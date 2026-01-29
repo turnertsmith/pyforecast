@@ -1,0 +1,56 @@
+# PyForecast Production Profile
+# Balanced settings for daily operations
+#
+# Use case: Production forecasting, ARIES export, standard workflows
+# Trade-offs: Good accuracy with reasonable processing time
+
+oil:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+gas:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+water:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+regime:
+  threshold: 1.0
+  window: 6
+  sustained_months: 2
+
+fitting:
+  recency_half_life: 12.0
+  min_points: 6
+
+output:
+  products:
+    - oil
+    - gas
+    - water
+  plots: true            # Generate individual well plots
+  batch_plot: true       # Generate batch overlay
+  format: ac_economic
+
+validation:
+  max_oil_rate: 50000
+  max_gas_rate: 500000
+  max_water_rate: 100000
+  gap_threshold_months: 2
+  outlier_sigma: 3.0
+  shutin_threshold: 1.0
+  min_cv: 0.05
+  min_r_squared: 0.5
+  max_annual_decline: 1.0
+  strict_mode: false
+
+refinement:
+  enable_logging: false      # Enable with --log-fits if desired
+  enable_hindcast: false     # Enable with --hindcast if desired
+  enable_residual_analysis: false
+  enable_learning: false

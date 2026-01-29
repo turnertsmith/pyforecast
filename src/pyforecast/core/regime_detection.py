@@ -1,8 +1,65 @@
-"""Improved regime change detection for decline curve analysis.
+"""Regime change detection for decline curve analysis.
 
-Detects regime changes (RTP, refrac) by comparing production against
-trend extrapolation, with adaptive thresholds based on data noise.
-Requires sustained deviation to filter out single-month outliers.
+Detects production regime changes (refracs, workovers, RTPs) by comparing
+actual production against trend extrapolation from prior history.
+
+Algorithm Overview
+------------------
+
+The regime detection algorithm identifies points where production deviates
+significantly and sustainably from the expected decline trend. This allows
+fitting only the most recent decline regime rather than the entire history.
+
+Steps:
+
+1. **Window Fitting**: For each point i, fit exponential decline to the
+   preceding window of data (default 6 months):
+
+       q(t) = q0 * exp(-D * t)
+
+   Also calculate residual standard deviation σ from the fit.
+
+2. **Trend Projection**: Project the fitted trend forward to point i:
+
+       q_projected = q0 * exp(-D * window_size)
+
+3. **Threshold Calculation**: Combine statistical and percentage criteria:
+
+       T_stat = q_projected + n_sigma * σ
+       T_pct  = q_projected * (1 + min_pct_increase)
+       Threshold = max(T_stat, T_pct)
+
+   This ensures both:
+   - Statistical significance (n_sigma standard deviations above trend)
+   - Practical significance (min_pct_increase above trend)
+
+4. **Sustained Detection**: A regime change is confirmed only when
+   production exceeds the threshold for sustained_months consecutive months.
+   This filters out single-month outliers and anomalies.
+
+5. **Frozen Baseline**: Once a potential change is detected, the baseline
+   is frozen (not updated) while checking for sustained elevation. This
+   prevents the corrupted data from affecting detection.
+
+6. **Most Recent Regime**: The algorithm returns the start index of the
+   most recent confirmed regime, not all regime changes in history.
+
+Configuration Parameters
+------------------------
+
+- window_size: Months of prior data for trend fitting (default: 6)
+- n_sigma: Standard deviations above projection (default: 2.5)
+- min_pct_increase: Minimum percentage increase required (default: 1.0 = 100%)
+- sustained_months: Consecutive months to confirm (default: 2)
+- min_data_points: Minimum points before attempting detection (default: 6)
+
+Example
+-------
+
+    >>> from pyforecast.core.regime_detection import detect_regime_change_improved
+    >>> rates = np.array([100, 90, 81, 73, 66, 60, 54, 49, 120, 108, 97, 87])
+    >>> regime_start = detect_regime_change_improved(rates)
+    >>> print(f"Regime starts at index {regime_start}")  # Index 8 (the jump)
 """
 
 import numpy as np
@@ -12,14 +69,43 @@ from dataclasses import dataclass
 
 @dataclass
 class RegimeDetectionConfig:
-    """Configuration for regime detection.
+    """Configuration for regime change detection.
+
+    These parameters control the sensitivity and robustness of regime
+    detection. Adjust based on your data characteristics:
+
+    - **Noisy data**: Increase n_sigma and sustained_months
+    - **Catch smaller events**: Decrease min_pct_increase
+    - **More history for trend**: Increase window_size
+    - **Faster response**: Decrease sustained_months (but more false positives)
 
     Attributes:
-        window_size: Number of months to use for trend fitting (default: 6)
-        n_sigma: Number of standard deviations above projection to trigger (default: 2.5)
-        min_pct_increase: Minimum percentage increase above projected to trigger (default: 0.5 = 50%)
-        sustained_months: Consecutive months above threshold to confirm change (default: 2)
-        min_data_points: Minimum points before attempting detection (default: 6)
+        window_size: Number of months of prior data used for trend fitting.
+            Larger values provide more stable trend estimates but may miss
+            regime changes in shorter decline periods. Default: 6 months.
+
+        n_sigma: Number of standard deviations above the projected trend
+            required for statistical significance. Higher values reduce
+            false positives but may miss real events. Default: 2.5
+
+        min_pct_increase: Minimum percentage increase above projected rate
+            required, expressed as a fraction (1.0 = 100%). This ensures
+            the production increase is practically significant, not just
+            statistically significant. Default: 1.0 (100%)
+
+        sustained_months: Number of consecutive months that production must
+            exceed the threshold to confirm a regime change. Filters out
+            single-month outliers and noise. Default: 2 months.
+
+        min_data_points: Minimum total data points required before attempting
+            regime detection. Wells with insufficient history return index 0
+            (use all data). Default: 6 months.
+
+    Example:
+        >>> config = RegimeDetectionConfig(
+        ...     threshold=0.5,       # More sensitive (50% increase)
+        ...     sustained_months=3,  # More robust confirmation
+        ... )
     """
     window_size: int = 6
     n_sigma: float = 2.5
@@ -102,19 +188,40 @@ def detect_regime_change_improved(
 ) -> int:
     """Detect the most recent regime change using trend extrapolation.
 
-    A regime change is confirmed when:
-    1. Production exceeds projected_rate + n_sigma * residual_std
-    2. This elevated production is sustained for sustained_months
+    Scans through production history to find where the current decline
+    regime started. A regime change is confirmed when production exceeds
+    the projected decline trend and remains elevated.
 
-    Key: Once elevation is detected, we freeze the baseline and continue
-    comparing against the pre-change trend (not a corrupted window).
+    Detection Criteria:
+        1. Production exceeds max(statistical_threshold, percentage_threshold)
+        2. This elevated production is sustained for sustained_months
+
+    The algorithm freezes the baseline once a potential change is detected,
+    preventing the elevated data from corrupting the trend estimate.
 
     Args:
-        rates: Production rates array (chronological order)
-        config: Detection configuration
+        rates: Production rates array in chronological order (oldest first).
+            Should be non-negative monthly production values.
+        config: Detection configuration. If None, uses default settings
+            (window=6, n_sigma=2.5, min_pct=100%, sustained=2).
 
     Returns:
-        Index of the start of the current regime (0 if no change detected)
+        Index of the start of the current (most recent) regime.
+        Returns 0 if no regime change is detected, meaning all data
+        should be used for fitting.
+
+    Example:
+        >>> rates = np.array([100, 90, 81, 73, 66, 60, 200, 180, 162, 146])
+        >>> start_idx = detect_regime_change_improved(rates)
+        >>> # Fit only data from start_idx onward
+        >>> t_fit = np.arange(len(rates) - start_idx)
+        >>> q_fit = rates[start_idx:]
+
+    Note:
+        This function finds only the MOST RECENT regime change. If multiple
+        regime changes occurred (e.g., two refracs), only the latest is
+        returned. Earlier regimes are ignored since they don't represent
+        current well behavior.
     """
     if config is None:
         config = RegimeDetectionConfig()

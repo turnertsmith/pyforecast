@@ -1,0 +1,55 @@
+# PyForecast Quick Profile
+# Optimized for fast initial runs with minimal overhead
+#
+# Use case: Quick checks, initial data exploration, development
+# Trade-offs: Less validation, no plots, faster processing
+
+oil:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+gas:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+water:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+regime:
+  threshold: 1.0
+  window: 6
+  sustained_months: 2
+
+fitting:
+  recency_half_life: 12.0
+  min_points: 6
+
+output:
+  products:
+    - oil
+    - gas
+  plots: false           # Skip individual plots for speed
+  batch_plot: false      # Skip batch plot
+  format: ac_economic
+
+validation:
+  max_oil_rate: 50000
+  max_gas_rate: 500000
+  max_water_rate: 100000
+  gap_threshold_months: 3   # Less sensitive
+  outlier_sigma: 4.0        # Less sensitive
+  shutin_threshold: 1.0
+  min_cv: 0.03              # More permissive
+  min_r_squared: 0.4        # More permissive
+  max_annual_decline: 1.5   # More permissive
+  strict_mode: false
+
+refinement:
+  enable_logging: false
+  enable_hindcast: false
+  enable_residual_analysis: false
+  enable_learning: false

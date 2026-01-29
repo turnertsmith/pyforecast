@@ -1,7 +1,50 @@
 """Arps decline curve models for oil and gas production forecasting.
 
-Implements hyperbolic decline model with Dmin terminal decline switch.
-Exponential (b~0) and Harmonic (b=1) are special cases of hyperbolic.
+This module implements the hyperbolic decline model with Dmin terminal decline
+switch. Exponential (b~0) and Harmonic (b=1) are special cases of hyperbolic.
+
+Mathematical Background
+-----------------------
+
+The Arps hyperbolic decline equation is the industry standard for production
+forecasting:
+
+    q(t) = qi / (1 + b * Di * t)^(1/b)
+
+Where:
+    q(t) = Production rate at time t
+    qi   = Initial production rate at t=0
+    Di   = Initial nominal decline rate (fraction/time)
+    b    = Hyperbolic exponent (dimensionless, typically 0 to 1.5)
+    t    = Time from start
+
+Special Cases:
+    - Exponential (b → 0): q(t) = qi * exp(-Di * t)
+    - Harmonic (b = 1):    q(t) = qi / (1 + Di * t)
+
+Terminal Decline Switch:
+    The hyperbolic equation with b > 0 implies decline rate approaches zero
+    as time increases, leading to unrealistically long well lives. The terminal
+    decline switch addresses this by switching to exponential decline when the
+    instantaneous decline rate falls to Dmin:
+
+    t_switch = (Di/Dmin - 1) / (b * Di)
+
+    For t > t_switch:
+        q(t) = q_switch * exp(-Dmin * (t - t_switch))
+
+Cumulative Production:
+    General hyperbolic (b ≠ 0, 1):
+        Np(t) = qi / ((1-b) * Di) * [1 - (1 + b*Di*t)^((b-1)/b)]
+
+    Exponential (b → 0):
+        Np(t) = qi / Di * (1 - exp(-Di * t))
+
+    Harmonic (b = 1):
+        Np(t) = qi / Di * ln(1 + Di * t)
+
+References:
+    Arps, J.J. (1945). "Analysis of Decline Curves". Trans. AIME, 160, 228-247.
 """
 
 from dataclasses import dataclass, field
@@ -11,17 +54,43 @@ import numpy as np
 
 @dataclass
 class HyperbolicModel:
-    """Hyperbolic decline model: q(t) = qi / (1 + b*Di*t)^(1/b)
+    """Hyperbolic decline model with terminal decline switch.
 
-    With Dmin terminal decline: switches to exponential when instantaneous
-    decline rate falls below Dmin.
+    Implements the Arps hyperbolic decline equation:
+
+        q(t) = qi / (1 + b * Di * t)^(1/b)
+
+    With automatic switch to exponential terminal decline when the
+    instantaneous decline rate D(t) = Di / (1 + b*Di*t) falls below Dmin.
+
+    The switch time is calculated as:
+
+        t_switch = (Di/Dmin - 1) / (b * Di)
+
+    After t_switch, the model uses exponential decline at Dmin rate:
+
+        q(t) = q_switch * exp(-Dmin * (t - t_switch))
 
     Attributes:
-        qi: Initial rate at t=0 (bbl/month or mcf/month)
-        di: Initial nominal decline rate (fraction/month)
-        b: Hyperbolic exponent (0.01-1.5 typical range)
-        dmin: Terminal decline rate (fraction/month), switches to exponential
-        t_switch: Time (months) when decline switches to terminal exponential
+        qi: Initial rate at t=0 (units: bbl/day or mcf/day for fitting,
+            output is same units as input)
+        di: Initial nominal decline rate (fraction/month). This is the
+            instantaneous decline rate at t=0.
+        b: Hyperbolic exponent (dimensionless). Typical ranges:
+            - 0.01-0.1: Near-exponential (conventional wells)
+            - 0.3-0.8: Typical unconventional (tight oil/gas)
+            - 0.8-1.0: Harmonic-like (transient flow)
+            - 1.0-1.5: Super-harmonic (rare, early-time transient)
+        dmin: Terminal decline rate (fraction/month). When instantaneous
+            decline D(t) reaches this value, switches to exponential.
+            Typical: 0.005 (6%/year) to 0.0083 (10%/year)
+        t_switch: Time (months) when decline switches to terminal exponential.
+            Calculated automatically from di, dmin, and b.
+
+    Example:
+        >>> model = HyperbolicModel(qi=100, di=0.05, b=0.5, dmin=0.005)
+        >>> rates = model.rate([0, 12, 24, 36])  # Monthly rates
+        >>> cumulative = model.cumulative(60)    # 5-year EUR
     """
     qi: float
     di: float

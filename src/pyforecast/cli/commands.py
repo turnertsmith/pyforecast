@@ -502,24 +502,195 @@ def init(
             help="Output file path",
         )
     ] = Path("pyforecast.yaml"),
+    profile: Annotated[
+        Optional[str],
+        typer.Option(
+            "--profile",
+            help="Configuration profile: quick, production, or research",
+        )
+    ] = None,
 ) -> None:
     """Generate a default configuration file.
 
     Creates a YAML config file with all available settings and their defaults.
     Edit this file to customize per-product b-factor and dmin settings.
 
-    Example:
+    Profiles:
+        quick      - Fast processing, minimal validation, no plots
+        production - Balanced settings for daily operations (default)
+        research   - All features enabled, maximum diagnostics
+
+    Examples:
         pyforecast init -o my_config.yaml
+        pyforecast init --profile quick -o quick_config.yaml
     """
+    import shutil
+
     if output.exists():
         overwrite = typer.confirm(f"{output} already exists. Overwrite?")
         if not overwrite:
             raise typer.Exit(0)
 
-    generate_default_config(output)
-    typer.echo(f"Config file created: {output}")
+    if profile:
+        # Use profile template
+        valid_profiles = {"quick", "production", "research"}
+        if profile.lower() not in valid_profiles:
+            typer.echo(f"Error: Invalid profile '{profile}'. Must be one of: {', '.join(valid_profiles)}", err=True)
+            raise typer.Exit(1)
+
+        # Find profile file - check multiple locations
+        profile_name = profile.lower()
+        profile_paths = [
+            Path(__file__).parent.parent.parent.parent / "configs" / f"{profile_name}.yaml",
+            Path(__file__).parent.parent / "configs" / f"{profile_name}.yaml",
+        ]
+
+        profile_path = None
+        for p in profile_paths:
+            if p.exists():
+                profile_path = p
+                break
+
+        if profile_path is None:
+            # Generate inline if profile files not found
+            typer.echo(f"Using {profile_name} profile settings...")
+            _generate_profile_config(output, profile_name)
+        else:
+            shutil.copy(profile_path, output)
+
+        typer.echo(f"Config file created: {output} (profile: {profile_name})")
+    else:
+        generate_default_config(output)
+        typer.echo(f"Config file created: {output}")
+
     typer.echo("\nEdit this file to customize settings, then use:")
     typer.echo(f"  pyforecast process data.csv --config {output}")
+
+
+def _generate_profile_config(filepath: Path, profile: str) -> None:
+    """Generate a profile-specific configuration file.
+
+    Args:
+        filepath: Output file path
+        profile: Profile name (quick, production, research)
+    """
+    # Profile-specific settings
+    profiles = {
+        "quick": {
+            "plots": "false",
+            "batch_plot": "false",
+            "gap_threshold_months": "3",
+            "outlier_sigma": "4.0",
+            "min_cv": "0.03",
+            "min_r_squared": "0.4",
+            "max_annual_decline": "1.5",
+            "refinement_logging": "false",
+            "refinement_hindcast": "false",
+            "refinement_residuals": "false",
+        },
+        "production": {
+            "plots": "true",
+            "batch_plot": "true",
+            "gap_threshold_months": "2",
+            "outlier_sigma": "3.0",
+            "min_cv": "0.05",
+            "min_r_squared": "0.5",
+            "max_annual_decline": "1.0",
+            "refinement_logging": "false",
+            "refinement_hindcast": "false",
+            "refinement_residuals": "false",
+        },
+        "research": {
+            "plots": "true",
+            "batch_plot": "true",
+            "gap_threshold_months": "2",
+            "outlier_sigma": "3.0",
+            "min_cv": "0.05",
+            "min_r_squared": "0.5",
+            "max_annual_decline": "1.0",
+            "refinement_logging": "true",
+            "refinement_hindcast": "true",
+            "refinement_residuals": "true",
+        },
+    }
+
+    settings = profiles[profile]
+
+    content = f"""# PyForecast Configuration File
+# Profile: {profile}
+# Per-product decline curve fitting parameters
+
+oil:
+  b_min: 0.01      # Minimum b-factor (0.01 = near-exponential)
+  b_max: 1.5       # Maximum b-factor (1.0 = harmonic, >1 = super-harmonic)
+  dmin: 0.06       # Terminal decline rate (annual, 0.06 = 6%)
+
+gas:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+water:
+  b_min: 0.01
+  b_max: 1.5
+  dmin: 0.06
+
+# Regime change detection (RTP, refrac)
+regime:
+  threshold: 1.0          # Minimum increase to trigger (1.0 = 100%)
+  window: 6               # Months of trend data to fit
+  sustained_months: 2     # Months elevation must persist
+
+# General fitting parameters
+fitting:
+  recency_half_life: 12.0  # Half-life for recent data weighting (months)
+  min_points: 6            # Minimum months of data required
+
+# Output options
+output:
+  products:               # Products to forecast
+    - oil
+    - gas
+    - water
+  plots: {settings['plots']}             # Generate individual well plots
+  batch_plot: {settings['batch_plot']}        # Generate multi-well overlay plot
+  format: ac_economic     # Export format: ac_economic or json
+
+# Data validation settings
+validation:
+  max_oil_rate: 50000     # Max expected oil rate (bbl/mo) - IV002
+  max_gas_rate: 500000    # Max expected gas rate (mcf/mo) - IV002
+  max_water_rate: 100000  # Max expected water rate (bbl/mo) - IV002
+  gap_threshold_months: {settings['gap_threshold_months']} # Min gap size to flag - DQ001
+  outlier_sigma: {settings['outlier_sigma']}      # Std devs for outlier detection - DQ002
+  shutin_threshold: 1.0   # Rate below = shut-in - DQ003
+  min_cv: {settings['min_cv']}            # Min coefficient of variation - DQ004
+  min_r_squared: {settings['min_r_squared']}      # Min acceptable R² - FR001
+  max_annual_decline: {settings['max_annual_decline']} # Max annual decline rate - FR005
+  strict_mode: false      # Treat warnings as errors
+
+# Refinement settings (fit quality analysis)
+refinement:
+  enable_logging: {settings['refinement_logging']}           # Log fit metadata to storage
+  log_storage: sqlite             # Storage type: sqlite or csv
+  log_path: null                  # null = ~/.pyforecast/fit_logs.db
+  enable_hindcast: {settings['refinement_hindcast']}          # Run hindcast validation
+  hindcast_holdout_months: 6      # Months to hold out for validation
+  min_training_months: 12         # Minimum training data required
+  enable_residual_analysis: {settings['refinement_residuals']} # Compute residual diagnostics
+  known_events_file: null         # CSV with known regime events
+  enable_learning: false          # Enable parameter learning
+  min_data_points_for_logging: 6  # Min data points to log fit
+  max_coefficient_of_variation: 0 # Max CV for logging (0 = no limit)
+  min_r_squared_for_logging: 0    # Min R² for logging (0 = no limit)
+  ground_truth_file: null         # ARIES AC_ECONOMIC CSV for comparison
+  ground_truth_months: 60         # Months to compare forecasts
+  ground_truth_lazy: false        # Stream file instead of loading into memory
+  ground_truth_workers: 1         # Parallel workers (1 = sequential)
+"""
+
+    with open(filepath, "w") as f:
+        f.write(content)
 
 
 @app.command()
