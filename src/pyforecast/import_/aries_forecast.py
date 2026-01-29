@@ -132,6 +132,11 @@ class AriesForecastImporter:
     def load(self, filepath: Path | str) -> int:
         """Load ARIES forecasts from CSV file.
 
+        Supports two formats:
+        1. AC_ECONOMIC format (row-based): PROPNUM, KEYWORD, EXPRESSION columns
+           where KEYWORD is OIL/GAS/WATER and EXPRESSION contains the decline params
+        2. Flat format: PROPNUM with expression columns (OIL_EXPRESSION, etc.)
+
         Args:
             filepath: Path to CSV file with ARIES expressions
 
@@ -150,9 +155,14 @@ class AriesForecastImporter:
         with open(filepath, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
 
-            # Normalize column names (strip, uppercase)
             if reader.fieldnames is None:
                 raise ValueError("CSV file has no headers")
+
+            # Normalize column names
+            fieldnames_upper = [fn.strip().upper() for fn in reader.fieldnames]
+
+            # Detect format: AC_ECONOMIC has KEYWORD and EXPRESSION columns
+            is_ac_economic = "KEYWORD" in fieldnames_upper and "EXPRESSION" in fieldnames_upper
 
             for row in reader:
                 # Normalize row keys
@@ -162,18 +172,68 @@ class AriesForecastImporter:
                 if not propnum:
                     continue
 
-                # Try to parse expression columns
-                for col, value in row.items():
-                    if not value or not value.strip():
-                        continue
+                if is_ac_economic:
+                    # AC_ECONOMIC format: parse based on KEYWORD
+                    count += self._parse_ac_economic_row(propnum, row)
+                else:
+                    # Flat format: try all columns for expressions
+                    count += self._parse_flat_row(propnum, row)
 
-                    # Try to parse as ARIES expression
-                    params = self._parse_expression(propnum, value.strip())
-                    if params:
-                        key = (propnum, params.product)
-                        self._forecasts[key] = params
-                        count += 1
+        return count
 
+    def _parse_ac_economic_row(self, propnum: str, row: dict[str, str]) -> int:
+        """Parse AC_ECONOMIC format row.
+
+        Returns number of forecasts parsed (0 or 1).
+        """
+        keyword = row.get("KEYWORD", "").strip().upper()
+        expression = row.get("EXPRESSION", "").strip()
+
+        # Only process OIL, GAS, WATER keywords (skip CUMS, START, continuation rows)
+        if keyword not in ("OIL", "GAS", "WATER"):
+            return 0
+
+        if not expression:
+            return 0
+
+        # Map keyword to product
+        product_map = {"OIL": "oil", "GAS": "gas", "WATER": "water"}
+        expected_product = product_map[keyword]
+
+        params = self._parse_expression(propnum, expression)
+        if params is None:
+            return 0
+
+        # Override product based on KEYWORD (more reliable than unit inference)
+        params = AriesForecastParams(
+            propnum=params.propnum,
+            product=expected_product,
+            qi=params.qi,
+            di=params.di,
+            b=params.b,
+            dmin=params.dmin,
+            decline_type=params.decline_type,
+        )
+
+        key = (propnum, expected_product)
+        self._forecasts[key] = params
+        return 1
+
+    def _parse_flat_row(self, propnum: str, row: dict[str, str]) -> int:
+        """Parse flat format row (expression columns).
+
+        Returns number of forecasts parsed.
+        """
+        count = 0
+        for col, value in row.items():
+            if not value or not value.strip():
+                continue
+
+            params = self._parse_expression(propnum, value.strip())
+            if params:
+                key = (propnum, params.product)
+                self._forecasts[key] = params
+                count += 1
         return count
 
     def _get_propnum(self, row: dict[str, str]) -> str | None:

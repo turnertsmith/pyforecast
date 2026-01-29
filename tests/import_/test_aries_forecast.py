@@ -336,3 +336,82 @@ class TestAriesForecastImporter:
         )
         assert params is not None
         assert params.decline_type == "EXP"
+
+    def test_load_ac_economic_format(self):
+        """Test loading AC_ECONOMIC format with KEYWORD/EXPRESSION columns."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'SECTION', 'SEQUENCE', 'QUALIFIER', 'KEYWORD', 'EXPRESSION'])
+            # CUMS row (should be skipped)
+            writer.writerow(['42-001-00001', '4', '1', 'KA0125', 'CUMS', '123.456 789.012'])
+            # START row (should be skipped)
+            writer.writerow(['42-001-00001', '4', '2', 'KA0125', 'START', '02/2025'])
+            # OIL row
+            writer.writerow(['42-001-00001', '4', '100', 'KA0125', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            # Continuation row (should be skipped)
+            writer.writerow(['42-001-00001', '4', '200', 'KA0125', '"', 'X 1 B/M X YRS EXP 6'])
+            # GAS row
+            writer.writerow(['42-001-00001', '4', '300', 'KA0125', 'GAS', '5000 X M/M 6 EXP B/0.30 12'])
+            # Second well
+            writer.writerow(['42-001-00002', '4', '100', 'KA0125', 'OIL', '500 X B/M 6 HYP B/0.75 10'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter()
+            count = importer.load(filepath)
+
+            # Should have loaded 3 forecasts (2 oil, 1 gas)
+            assert count == 3
+
+            # Check first well oil
+            params = importer.get('42-001-00001', 'oil')
+            assert params is not None
+            assert params.b == 0.50
+            assert params.decline_type == "EXP"
+
+            # Check first well gas
+            params = importer.get('42-001-00001', 'gas')
+            assert params is not None
+            assert params.b == 0.30
+            assert params.product == "gas"
+
+            # Check second well oil
+            params = importer.get('42-001-00002', 'oil')
+            assert params is not None
+            assert params.b == 0.75
+            assert params.decline_type == "HYP"
+
+            # Verify wells list
+            wells = importer.list_wells()
+            assert '42-001-00001' in wells
+            assert '42-001-00002' in wells
+        finally:
+            filepath.unlink()
+
+    def test_ac_economic_keyword_determines_product(self):
+        """Test that KEYWORD column overrides unit-based product detection."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            # GAS keyword but B/M unit (KEYWORD should win)
+            writer.writerow(['well-1', 'GAS', '1000 X B/M 6 EXP B/0.50 8.5'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter()
+            count = importer.load(filepath)
+
+            assert count == 1
+            # Should be gas despite B/M unit because KEYWORD says GAS
+            params = importer.get('well-1', 'gas')
+            assert params is not None
+            assert params.product == 'gas'
+
+            # Should NOT be oil
+            assert importer.get('well-1', 'oil') is None
+        finally:
+            filepath.unlink()
