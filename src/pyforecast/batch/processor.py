@@ -14,9 +14,6 @@ from ..data.well import Well
 from ..data.base import load_wells
 from ..core.fitting import DeclineFitter, FittingConfig
 from ..core.models import ForecastResult
-from ..export.aries_ac_economic import AriesAcEconomicExporter
-from ..export.json_export import JsonExporter
-from ..visualization.plots import DeclinePlotter
 from ..validation import (
     ValidationResult,
     InputValidator,
@@ -25,6 +22,9 @@ from ..validation import (
     IssueCategory,
     IssueSeverity,
 )
+
+# Lazy imports for decomposed modules to avoid circular imports
+# These are imported in methods that need them
 
 if TYPE_CHECKING:
     from ..config import PyForecastConfig, ValidationConfig, RefinementConfig
@@ -810,75 +810,47 @@ class BatchProcessor:
     def _save_outputs(self, result: BatchResult, output_dir: Path) -> None:
         """Save all outputs to directory.
 
+        Uses BatchExporter for forecast export and BatchVisualizer for plots.
+        This method orchestrates the output process while delegating actual
+        work to specialized classes.
+
         Args:
             result: Batch processing result
             output_dir: Output directory
         """
-        # Export forecasts based on format
-        if self.config.export_format == "json":
-            exporter = JsonExporter(
-                config=self.config.pyforecast_config,
-            )
-            forecast_path = output_dir / "forecasts.json"
-            exporter.save(
-                result.wells,
-                forecast_path,
-                self.config.products,
-                result.validation_results,
-            )
-        else:
-            # Default: ac_economic format
-            exporter = AriesAcEconomicExporter()
-            forecast_path = output_dir / "ac_economic.csv"
-            exporter.save(result.wells, forecast_path, self.config.products)
+        from .exporter import BatchExporter
+        from .visualizer import BatchVisualizer
 
-        logger.info(f"Saved forecast to {forecast_path}")
+        # Export forecasts using BatchExporter
+        exporter = BatchExporter(
+            export_format=self.config.export_format,
+            pyforecast_config=self.config.pyforecast_config,
+        )
+        exporter.export_forecasts(
+            wells=result.wells,
+            output_dir=output_dir,
+            products=self.config.products,
+            validation_results=result.validation_results,
+        )
 
-        # Save plots
+        # Save plots using BatchVisualizer
         if self.config.save_plots or self.config.save_batch_plot:
-            plotter = DeclinePlotter()
-            plots_dir = output_dir / "plots"
-            plots_dir.mkdir(exist_ok=True)
-
-            # Individual plots
-            if self.config.save_plots:
-                for well in result.wells:
-                    for product in self.config.products:
-                        if well.get_forecast(product) is not None:
-                            try:
-                                fig = plotter.plot_well(well, product)
-                                filename = f"{well.well_id}_{product}.html".replace("/", "_")
-                                plotter.save(fig, plots_dir / filename)
-                            except Exception as e:
-                                logger.warning(f"Failed to plot {well.well_id}: {e}")
-
-            # Batch overlay plot
-            if self.config.save_batch_plot and result.wells:
-                for product in self.config.products:
-                    wells_with_forecast = [
-                        w for w in result.wells if w.get_forecast(product) is not None
-                    ]
-                    if wells_with_forecast:
-                        try:
-                            fig = plotter.plot_multiple_wells(
-                                wells_with_forecast[:20],
-                                product
-                            )
-                            plotter.save(fig, plots_dir / f"batch_{product}.html")
-                        except Exception as e:
-                            logger.warning(f"Failed to create batch plot: {e}")
+            visualizer = BatchVisualizer()
+            visualizer.save_all_plots(
+                wells=result.wells,
+                output_dir=output_dir,
+                products=self.config.products,
+                save_individual=self.config.save_plots,
+                save_batch=self.config.save_batch_plot,
+            )
 
         # Save error log
         if result.errors:
-            error_path = output_dir / "errors.txt"
-            with open(error_path, "w") as f:
-                for well_id, error in result.errors:
-                    f.write(f"{well_id}: {error}\n")
-            logger.info(f"Saved error log to {error_path}")
+            exporter.export_errors(result.errors, output_dir)
 
         # Save validation report
         if result.validation_results:
-            self._save_validation_report(result, output_dir)
+            exporter.export_validation_report(result.validation_results, output_dir)
 
         # Save refinement report if enabled
         if result.refinement_results is not None:

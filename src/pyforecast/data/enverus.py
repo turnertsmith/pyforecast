@@ -1,4 +1,52 @@
-"""Parser for Enverus production data exports."""
+"""Parser for Enverus production data exports.
+
+This module provides the EnverusParser class for parsing CSV files exported
+from Enverus (formerly DrillingInfo) production database.
+
+Format Detection
+----------------
+
+The parser automatically detects Enverus format when a CSV file has:
+1. A well identifier column (Entity ID, API Number, or similar)
+2. A date column (Production Date, Date, etc.)
+3. At least one production column (Oil, Gas, Liquid)
+
+The detection is case-insensitive and tolerant of spacing variations.
+
+Column Mapping
+--------------
+
+The parser maps common Enverus column names to standard internal names:
+
+Well Identifiers:
+    - entity id, entityid, entity_id -> entity_id
+    - api, api number, api_number, api14, api 14 -> api
+    - well name, wellname, well_name -> well_name
+
+Dates:
+    - production date, productiondate, production_date -> date
+    - date, prod date, month -> date
+
+Production Volumes:
+    - oil, oil (bbl), oil bbl, oil_bbl, liquid, liquid (bbl), liq -> oil
+    - gas, gas (mcf), gas mcf, gas_mcf, monthly gas -> gas
+    - water, water (bbl), water bbl, water_bbl, monthly water -> water
+
+Expected Units:
+    - Oil: barrels (bbl) per month
+    - Gas: thousand cubic feet (mcf) per month
+    - Water: barrels (bbl) per month
+
+Example Input File
+------------------
+
+```csv
+Entity ID,Well Name,Production Date,Oil (BBL),Gas (MCF),Water (BBL)
+12345678,Smith 1H,2020-01-01,5000,25000,1000
+12345678,Smith 1H,2020-02-01,4500,22000,1100
+12345679,Jones 2H,2020-01-01,6000,30000,800
+```
+"""
 
 import numpy as np
 import pandas as pd
@@ -10,13 +58,36 @@ from .well import Well, WellIdentifier, ProductionData
 class EnverusParser(DataParser):
     """Parser for Enverus (formerly DrillingInfo) CSV exports.
 
-    Expected columns (case-insensitive):
-    - Entity ID or API Number: Well identifier
-    - Well Name: Optional well name
-    - Production Date or Date: Production month
-    - Oil or Liquid (BBL): Oil production
-    - Gas (MCF): Gas production
-    - Water (BBL): Optional water production
+    This parser handles the standard Enverus production data export format,
+    with flexible column name matching to accommodate variations in exports
+    from different Enverus products and versions.
+
+    Format Detection Logic:
+        The parser identifies Enverus format by checking for:
+        1. An identifier column (entity_id OR api number)
+        2. A date column (production date, date, month)
+        3. At least one production column (oil, gas, liquid)
+
+        All checks are case-insensitive.
+
+    Column Priority:
+        When multiple columns match the same standard name, the first match
+        (in the order columns appear in the file) takes priority.
+
+    Attributes:
+        COLUMN_MAPPINGS: Dictionary mapping lowercase column names to standard
+            internal names. Used for flexible column matching.
+
+    Example:
+        >>> parser = EnverusParser()
+        >>> if parser.can_parse(df):
+        ...     wells = parser.parse(df)
+        ...     for well in wells:
+        ...         print(f"{well.well_id}: {len(well.production.oil)} months")
+
+    See Also:
+        AriesParser: For ARIES-format production data
+        DataParser: Abstract base class for data parsers
     """
 
     # Column name mappings (lowercase -> standard name)
