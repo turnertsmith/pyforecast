@@ -1,12 +1,12 @@
 """Data classes for refinement module.
 
 Defines structured data types for fit logging, hindcast validation,
-and residual analysis.
+residual analysis, and ground truth comparison.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 import numpy as np
@@ -440,4 +440,173 @@ class ParameterSuggestion:
             "avg_r_squared": self.avg_r_squared,
             "avg_hindcast_mape": self.avg_hindcast_mape,
             "confidence": self.confidence,
+        }
+
+
+@dataclass
+class GroundTruthResult:
+    """Result of comparing pyforecast fit against ARIES ground truth.
+
+    Compares fitted decline curve parameters and forecasted production
+    against expert/approved ARIES projections.
+
+    Attributes:
+        well_id: Well identifier
+        product: Product type (oil, gas, water)
+
+        # ARIES parameters (stored in daily rate / monthly decline)
+        aries_qi: ARIES initial rate (daily)
+        aries_di: ARIES initial decline (monthly fraction)
+        aries_b: ARIES hyperbolic exponent
+        aries_decline_type: ARIES decline type (EXP, HYP, HRM)
+
+        # pyforecast parameters
+        pyf_qi: pyforecast initial rate (daily)
+        pyf_di: pyforecast initial decline (monthly fraction)
+        pyf_b: pyforecast hyperbolic exponent
+
+        # Parameter differences
+        qi_pct_diff: (pyf - aries) / aries * 100
+        di_pct_diff: (pyf - aries) / aries * 100
+        b_abs_diff: pyf_b - aries_b
+
+        # Forecast comparison metrics
+        comparison_months: Number of months compared
+        mape: Mean Absolute Percentage Error (%)
+        correlation: Pearson correlation coefficient
+        bias: Systematic over/under prediction (positive = pyf over-predicts)
+        cumulative_diff_pct: (pyf_cum - aries_cum) / aries_cum * 100
+
+        # Arrays for plotting (optional, can be large)
+        forecast_months: Time array for forecast comparison
+        aries_rates: ARIES forecasted rates (daily)
+        pyf_rates: pyforecast forecasted rates (daily)
+    """
+
+    well_id: str
+    product: Literal["oil", "gas", "water"]
+
+    # ARIES parameters
+    aries_qi: float
+    aries_di: float
+    aries_b: float
+    aries_decline_type: str
+
+    # pyforecast parameters
+    pyf_qi: float
+    pyf_di: float
+    pyf_b: float
+
+    # Parameter differences
+    qi_pct_diff: float
+    di_pct_diff: float
+    b_abs_diff: float
+
+    # Forecast comparison metrics
+    comparison_months: int
+    mape: float
+    correlation: float
+    bias: float
+    cumulative_diff_pct: float
+
+    # Arrays for plotting
+    forecast_months: np.ndarray = field(default_factory=lambda: np.array([]))
+    aries_rates: np.ndarray = field(default_factory=lambda: np.array([]))
+    pyf_rates: np.ndarray = field(default_factory=lambda: np.array([]))
+
+    @property
+    def is_good_match(self) -> bool:
+        """Check if pyforecast fit is a good match to ARIES ground truth.
+
+        A good match meets all criteria:
+        - MAPE < 20% (forecast curves are similar)
+        - Correlation > 0.95 (curves track well together)
+        - Cumulative diff < 15% (total volumes are similar)
+        - b-factor diff < 0.3 (decline shape is similar)
+
+        Returns:
+            True if all criteria are met
+        """
+        return (
+            self.mape < 20.0
+            and self.correlation > 0.95
+            and abs(self.cumulative_diff_pct) < 15.0
+            and abs(self.b_abs_diff) < 0.3
+        )
+
+    @property
+    def match_grade(self) -> str:
+        """Return a grade for the match quality.
+
+        Returns:
+            "A" (excellent), "B" (good), "C" (fair), or "D" (poor)
+        """
+        score = 0
+
+        # MAPE scoring
+        if self.mape < 10:
+            score += 3
+        elif self.mape < 20:
+            score += 2
+        elif self.mape < 30:
+            score += 1
+
+        # Correlation scoring
+        if self.correlation > 0.98:
+            score += 3
+        elif self.correlation > 0.95:
+            score += 2
+        elif self.correlation > 0.90:
+            score += 1
+
+        # Cumulative diff scoring
+        abs_cum = abs(self.cumulative_diff_pct)
+        if abs_cum < 5:
+            score += 3
+        elif abs_cum < 15:
+            score += 2
+        elif abs_cum < 25:
+            score += 1
+
+        # b-factor diff scoring
+        abs_b = abs(self.b_abs_diff)
+        if abs_b < 0.1:
+            score += 3
+        elif abs_b < 0.3:
+            score += 2
+        elif abs_b < 0.5:
+            score += 1
+
+        # Grade based on total score (max 12)
+        if score >= 10:
+            return "A"
+        elif score >= 7:
+            return "B"
+        elif score >= 4:
+            return "C"
+        else:
+            return "D"
+
+    def summary(self) -> dict[str, Any]:
+        """Return summary dictionary."""
+        return {
+            "well_id": self.well_id,
+            "product": self.product,
+            "aries_qi": self.aries_qi,
+            "aries_di": self.aries_di,
+            "aries_b": self.aries_b,
+            "aries_decline_type": self.aries_decline_type,
+            "pyf_qi": self.pyf_qi,
+            "pyf_di": self.pyf_di,
+            "pyf_b": self.pyf_b,
+            "qi_pct_diff": self.qi_pct_diff,
+            "di_pct_diff": self.di_pct_diff,
+            "b_abs_diff": self.b_abs_diff,
+            "comparison_months": self.comparison_months,
+            "mape": self.mape,
+            "correlation": self.correlation,
+            "bias": self.bias,
+            "cumulative_diff_pct": self.cumulative_diff_pct,
+            "is_good_match": self.is_good_match,
+            "match_grade": self.match_grade,
         }

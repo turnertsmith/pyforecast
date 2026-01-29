@@ -82,10 +82,12 @@ class RefinementResults:
     Attributes:
         hindcast_results: Dict of (well_id, product) -> HindcastResult
         residual_diagnostics: Dict of (well_id, product) -> ResidualDiagnostics
+        ground_truth_results: Dict of (well_id, product) -> GroundTruthResult
         fit_logs_count: Number of fit logs recorded
     """
     hindcast_results: dict = field(default_factory=dict)
     residual_diagnostics: dict = field(default_factory=dict)
+    ground_truth_results: dict = field(default_factory=dict)
     fit_logs_count: int = 0
 
     def get_hindcast_summary(self) -> dict:
@@ -105,6 +107,15 @@ class RefinementResults:
             "avg_correlation": float(np.mean(correlations)),
             "good_hindcast_pct": good_count / len(mapes) * 100 if mapes else 0,
         }
+
+    def get_ground_truth_summary(self) -> dict:
+        """Get summary of ground truth comparison results."""
+        if not self.ground_truth_results:
+            return {"count": 0}
+
+        from ..refinement.ground_truth import summarize_ground_truth_results
+        results = list(self.ground_truth_results.values())
+        return summarize_ground_truth_results(results)
 
 
 @dataclass
@@ -980,5 +991,35 @@ class BatchProcessor:
                             f"  {well_id}/{product}: DW={diag.durbin_watson:.2f}, "
                             f"early_bias={diag.early_bias:.1%}, late_bias={diag.late_bias:.1%}\n"
                         )
+                f.write("\n")
+
+            # Ground truth comparison summary
+            if refinement_results.ground_truth_results:
+                f.write("Ground Truth Comparison Summary:\n")
+                gt_summary = refinement_results.get_ground_truth_summary()
+                f.write(f"  Wells with ARIES data: {gt_summary['count']}\n")
+                f.write(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%\n")
+                f.write(f"  Average correlation: {gt_summary['avg_correlation']:.3f}\n")
+                f.write(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%\n")
+                f.write("\n")
+
+                # Grade distribution
+                grades = gt_summary.get("grade_distribution", {})
+                f.write("  Grade distribution:\n")
+                for grade in ["A", "B", "C", "D"]:
+                    count = grades.get(grade, 0)
+                    f.write(f"    {grade}: {count}\n")
+                f.write("\n")
+
+                # Detailed ground truth results
+                f.write("Ground Truth Details:\n")
+                f.write("-" * 40 + "\n")
+                for (well_id, product), gt_result in sorted(refinement_results.ground_truth_results.items()):
+                    status = "GOOD" if gt_result.is_good_match else "----"
+                    f.write(
+                        f"  {well_id}/{product}: [{gt_result.match_grade}] {status} "
+                        f"MAPE={gt_result.mape:.1f}%, corr={gt_result.correlation:.3f}, "
+                        f"cum_diff={gt_result.cumulative_diff_pct:+.1f}%\n"
+                    )
 
         logger.info(f"Saved refinement report to {report_path}")

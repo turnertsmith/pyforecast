@@ -41,18 +41,21 @@ from .schemas import (
     FitLogRecord,
     HindcastResult,
     ResidualDiagnostics,
+    GroundTruthResult,
 )
 from .storage import FitLogStorage
 from .hindcast import HindcastValidator
 from .residual_analysis import ResidualAnalyzer
 from .fit_logger import FitLogger, DataQualityThresholds
 from .parameter_learning import ParameterLearner
+from .ground_truth import GroundTruthValidator, GroundTruthConfig, summarize_ground_truth_results
 
 __all__ = [
     # Data classes
     "FitLogRecord",
     "HindcastResult",
     "ResidualDiagnostics",
+    "GroundTruthResult",
     "DataQualityThresholds",
     # Storage
     "FitLogStorage",
@@ -61,4 +64,8 @@ __all__ = [
     "ResidualAnalyzer",
     "FitLogger",
     "ParameterLearner",
+    # Ground truth comparison
+    "GroundTruthValidator",
+    "GroundTruthConfig",
+    "summarize_ground_truth_results",
 ]

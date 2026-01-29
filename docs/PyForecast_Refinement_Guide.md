@@ -14,6 +14,7 @@ PyForecast includes a refinement module for measuring, logging, analyzing, and i
 - **Fit Logging** - Persist all fit parameters and metrics for analysis
 - **Residual Analysis** - Detect systematic fit errors (bias, autocorrelation)
 - **Parameter Learning** - Suggest optimal parameters from historical performance
+- **Ground Truth Comparison** - Compare auto-fitted curves against expert ARIES projections
 
 **Key Design Principle:** All refinement features are disabled by default and observation-only. They don't modify the core fitting behavior—they observe and report on it.
 
@@ -377,6 +378,158 @@ if suggestion:
 
 ---
 
+## Feature 5: Ground Truth Comparison
+
+Ground truth comparison measures how well pyforecast's auto-fitted decline curves match expert/approved ARIES projections.
+
+### Use Case
+
+When you have existing ARIES forecasts created by reservoir engineers, you can compare pyforecast's automated fits against these "ground truth" projections to:
+
+- Validate that auto-fitting produces reasonable results
+- Identify wells where manual review may be needed
+- Measure overall fitting accuracy across a portfolio
+
+### ARIES Expression Format
+
+PyForecast parses ARIES AC_ECONOMIC expression format:
+
+```
+"{Qi} X {unit} {Dmin%} {type} B/{b} {Di%}"
+```
+
+Example: `"1000 X B/M 6 EXP B/0.50 8.5"` means:
+- qi = 1000 bbl/month
+- unit = B/M (barrels/month)
+- dmin = 6% annual terminal decline
+- type = EXP (exponential)
+- b = 0.50 hyperbolic exponent
+- di = 8.5% annual initial decline
+
+### CLI Usage
+
+```bash
+# Run with ground truth comparison
+pyforecast process data.csv --ground-truth aries_projections.csv -o output/
+
+# With custom comparison period (default: 60 months)
+pyforecast process data.csv --ground-truth aries_projections.csv --gt-months 120 -o output/
+```
+
+### Example Output
+
+```
+Ground Truth Comparison:
+  Wells with ARIES data: 45 of 50
+  Average MAPE: 12.3%
+  Average correlation: 0.987
+  Good match rate: 82.2%
+
+  See output/ground_truth_report.txt for details
+```
+
+### Metrics Computed
+
+| Metric | Description | Good Value |
+|--------|-------------|------------|
+| **MAPE** | Mean Absolute Percentage Error of rates | < 20% |
+| **Correlation** | Pearson correlation of rate curves | > 0.95 |
+| **Cumulative Diff** | Difference in total production | < 15% |
+| **B-Factor Diff** | Absolute difference in b-factor | < 0.3 |
+
+### Match Quality Grades
+
+Wells are graded A-D based on overall match quality:
+
+| Grade | Criteria |
+|-------|----------|
+| **A** | Excellent match - all metrics well within thresholds |
+| **B** | Good match - minor deviations |
+| **C** | Fair match - some significant differences |
+| **D** | Poor match - review recommended |
+
+### Quality Threshold (is_good_match)
+
+A well is considered a "good match" when ALL of these criteria are met:
+- MAPE < 20%
+- Correlation > 0.95
+- Cumulative diff < 15%
+- B-factor diff < 0.3
+
+### Ground Truth Report
+
+The report (`ground_truth_report.txt`) includes:
+
+```
+PyForecast Ground Truth Comparison Report
+==================================================
+
+Summary:
+  Total comparisons: 45
+  Average MAPE: 12.3%
+  Median MAPE: 10.5%
+  Average correlation: 0.987
+  Average cumulative diff: 8.2%
+  Good match rate: 82.2%
+
+Grade Distribution:
+  A: 25 (55.6%)
+  B: 12 (26.7%)
+  C: 5 (11.1%)
+  D: 3 (6.7%)
+
+Detailed Results:
+--------------------------------------------------
+
+WELL-001/oil [A] GOOD
+  ARIES:      qi=500.0, di=8.5%/yr, b=0.500
+  pyforecast: qi=512.3, di=8.8%/yr, b=0.520
+  Differences: qi=+2.5%, di=+3.5%, b=+0.020
+  Metrics: MAPE=8.5%, corr=0.992, bias=+3.2%, cum_diff=+5.1%
+```
+
+### Programmatic Usage
+
+```python
+from pyforecast.import_ import AriesForecastImporter
+from pyforecast.refinement import GroundTruthValidator, GroundTruthConfig
+
+# Load ARIES forecasts
+importer = AriesForecastImporter()
+importer.load("aries_projections.csv")
+
+# Configure comparison
+config = GroundTruthConfig(comparison_months=60)
+validator = GroundTruthValidator(importer, config)
+
+# Compare a well
+result = validator.validate(well, "oil")
+
+if result:
+    print(f"MAPE: {result.mape:.1f}%")
+    print(f"Correlation: {result.correlation:.3f}")
+    print(f"Good match: {result.is_good_match}")
+    print(f"Grade: {result.match_grade}")
+```
+
+### ARIES CSV File Format
+
+The ARIES CSV file should have columns for well identifier and forecast expressions:
+
+```csv
+PROPNUM,OIL_EXPRESSION,GAS_EXPRESSION
+42-001-00001,1000 X B/M 6 HYP B/0.50 8.5,5000 X M/M 6 EXP B/0.10 12
+42-001-00002,500 X B/D 6 HYP B/0.75 10,
+```
+
+Supported unit codes:
+- `B/M` - barrels/month (oil)
+- `B/D` - barrels/day (oil)
+- `M/M` - mcf/month (gas)
+- `M/D` - mcf/day (gas)
+
+---
+
 ## Regime Detection Calibration
 
 Calibrate regime detection thresholds using known refrac/workover events.
@@ -530,9 +683,10 @@ pyforecast process new_data.csv -c updated_config.yaml -o output/
 
 ```python
 from pyforecast.refinement import (
-    FitLogRecord,      # Complete fit metadata
-    HindcastResult,    # Hindcast validation results
+    FitLogRecord,         # Complete fit metadata
+    HindcastResult,       # Hindcast validation results
     ResidualDiagnostics,  # Residual analysis metrics
+    GroundTruthResult,    # Ground truth comparison results
 )
 from pyforecast.refinement.schemas import ParameterSuggestion
 ```
@@ -541,10 +695,21 @@ from pyforecast.refinement.schemas import ParameterSuggestion
 
 ```python
 from pyforecast.refinement import (
-    HindcastValidator,  # Hindcast validation
-    ResidualAnalyzer,   # Residual analysis
-    FitLogger,          # Fit logging
-    ParameterLearner,   # Parameter suggestions
+    HindcastValidator,       # Hindcast validation
+    ResidualAnalyzer,        # Residual analysis
+    FitLogger,               # Fit logging
+    ParameterLearner,        # Parameter suggestions
+    GroundTruthValidator,    # Ground truth comparison
+    GroundTruthConfig,       # Ground truth configuration
+)
+```
+
+### ARIES Import
+
+```python
+from pyforecast.import_ import (
+    AriesForecastImporter,   # Load ARIES forecast files
+    AriesForecastParams,     # Parsed forecast parameters
 )
 ```
 

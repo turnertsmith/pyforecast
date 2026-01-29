@@ -94,6 +94,21 @@ def process(
             help="Compute residual diagnostics for fit quality analysis",
         )
     ] = False,
+    ground_truth: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--ground-truth",
+            help="ARIES AC_ECONOMIC CSV file for ground truth comparison",
+            exists=True,
+        )
+    ] = None,
+    gt_months: Annotated[
+        int,
+        typer.Option(
+            "--gt-months",
+            help="Months to compare forecasts against ground truth",
+        )
+    ] = 60,
 ) -> None:
     """Process production data and generate decline forecasts.
 
@@ -201,6 +216,31 @@ def process(
 
         typer.echo(f"  Logged {fit_logger.storage.count()} fits to storage")
 
+    # Run ground truth comparison if requested
+    gt_results = []
+    if ground_truth and result.wells:
+        from ..import_.aries_forecast import AriesForecastImporter
+        from ..refinement.ground_truth import GroundTruthValidator, GroundTruthConfig
+
+        typer.echo("Running ground truth comparison...")
+        aries_importer = AriesForecastImporter()
+        try:
+            count = aries_importer.load(ground_truth)
+            typer.echo(f"  Loaded {count} ARIES forecasts")
+        except Exception as e:
+            typer.echo(f"  Error loading ARIES file: {e}", err=True)
+            aries_importer = None
+
+        if aries_importer:
+            gt_config = GroundTruthConfig(comparison_months=gt_months)
+            gt_validator = GroundTruthValidator(aries_importer, gt_config)
+
+            for well in result.wells:
+                for prod in pf_config.output.products:
+                    gt_result = gt_validator.validate(well, prod)
+                    if gt_result is not None:
+                        gt_results.append(gt_result)
+
     # Report results
     typer.echo("")
     typer.echo("Results:")
@@ -250,6 +290,22 @@ def process(
             typer.echo(f"    With systematic patterns: {systematic} ({systematic/total*100:.1f}%)")
 
         typer.echo(f"\n  See {output}/refinement_report.txt for details")
+
+    # Report ground truth summary
+    if gt_results:
+        from ..refinement.ground_truth import summarize_ground_truth_results
+
+        gt_summary = summarize_ground_truth_results(gt_results)
+        typer.echo("")
+        typer.echo("Ground Truth Comparison:")
+        typer.echo(f"  Wells with ARIES data: {gt_summary['count']} of {result.successful}")
+        typer.echo(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%")
+        typer.echo(f"  Average correlation: {gt_summary['avg_correlation']:.3f}")
+        typer.echo(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%")
+
+        # Save ground truth report
+        _save_ground_truth_report(gt_results, gt_summary, output)
+        typer.echo(f"\n  See {output}/ground_truth_report.txt for details")
 
     typer.echo(f"\nOutput saved to: {output}/")
 
@@ -956,6 +1012,70 @@ def calibrate_regime(
                 "results": results,
             }, f, indent=2)
         typer.echo(f"\nCalibration results saved to: {output}")
+
+
+def _save_ground_truth_report(
+    results: list,
+    summary: dict,
+    output_dir: Path,
+) -> None:
+    """Save ground truth comparison report to file.
+
+    Args:
+        results: List of GroundTruthResult objects
+        summary: Summary statistics dictionary
+        output_dir: Output directory
+    """
+    report_path = output_dir / "ground_truth_report.txt"
+
+    with open(report_path, "w") as f:
+        f.write("PyForecast Ground Truth Comparison Report\n")
+        f.write("=" * 50 + "\n\n")
+
+        # Overall summary
+        f.write("Summary:\n")
+        f.write(f"  Total comparisons: {summary['count']}\n")
+        f.write(f"  Average MAPE: {summary['avg_mape']:.1f}%\n")
+        f.write(f"  Median MAPE: {summary['median_mape']:.1f}%\n")
+        f.write(f"  Average correlation: {summary['avg_correlation']:.3f}\n")
+        f.write(f"  Average cumulative diff: {summary['avg_cumulative_diff_pct']:.1f}%\n")
+        f.write(f"  Good match rate: {summary['good_match_pct']:.1f}%\n")
+        f.write("\n")
+
+        # Grade distribution
+        f.write("Grade Distribution:\n")
+        grades = summary.get("grade_distribution", {})
+        for grade in ["A", "B", "C", "D"]:
+            count = grades.get(grade, 0)
+            pct = count / summary['count'] * 100 if summary['count'] > 0 else 0
+            f.write(f"  {grade}: {count} ({pct:.1f}%)\n")
+        f.write("\n")
+
+        # By product
+        by_product = summary.get("by_product", {})
+        if by_product:
+            f.write("By Product:\n")
+            for product, stats in sorted(by_product.items()):
+                f.write(f"  {product}: {stats['count']} wells, "
+                       f"avg MAPE {stats['avg_mape']:.1f}%, "
+                       f"good match {stats['good_match_pct']:.1f}%\n")
+            f.write("\n")
+
+        # Detailed results
+        f.write("Detailed Results:\n")
+        f.write("-" * 50 + "\n")
+
+        # Sort by match grade then MAPE
+        sorted_results = sorted(results, key=lambda r: (r.match_grade, r.mape))
+
+        for r in sorted_results:
+            status = "GOOD" if r.is_good_match else "----"
+            f.write(f"\n{r.well_id}/{r.product} [{r.match_grade}] {status}\n")
+            f.write(f"  ARIES:      qi={r.aries_qi:.1f}, di={r.aries_di*12:.1%}/yr, b={r.aries_b:.3f}\n")
+            f.write(f"  pyforecast: qi={r.pyf_qi:.1f}, di={r.pyf_di*12:.1%}/yr, b={r.pyf_b:.3f}\n")
+            f.write(f"  Differences: qi={r.qi_pct_diff:+.1f}%, di={r.di_pct_diff:+.1f}%, b={r.b_abs_diff:+.3f}\n")
+            f.write(f"  Metrics: MAPE={r.mape:.1f}%, corr={r.correlation:.3f}, "
+                   f"bias={r.bias:.1%}, cum_diff={r.cumulative_diff_pct:+.1f}%\n")
 
 
 if __name__ == "__main__":
