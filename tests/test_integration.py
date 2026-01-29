@@ -11,7 +11,7 @@ from pyforecast.data.base import load_wells, detect_parser, DataParser
 from pyforecast.data.enverus import EnverusParser
 from pyforecast.data.aries import AriesParser
 from pyforecast.core.fitting import DeclineFitter, FittingConfig
-from pyforecast.export.aries_export import AriesExporter
+from pyforecast.export.aries_ac_economic import AriesAcEconomicExporter
 from pyforecast.visualization.plots import DeclinePlotter
 
 
@@ -78,8 +78,8 @@ class TestEndToEndWorkflow:
                 assert result.r_squared > 0.5
                 assert result.model.qi > 0
 
-        # Export to ARIES format
-        exporter = AriesExporter()
+        # Export to ARIES AC_ECONOMIC format
+        exporter = AriesAcEconomicExporter()
 
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
             output_path = Path(f.name)
@@ -91,8 +91,8 @@ class TestEndToEndWorkflow:
             df = pd.read_csv(output_path)
             assert len(df) > 0
             assert "PROPNUM" in df.columns
-            assert "DECLINE_TYPE" in df.columns
-            assert "B_FACTOR" in df.columns
+            assert "KEYWORD" in df.columns
+            assert "EXPRESSION" in df.columns
 
         finally:
             output_path.unlink()

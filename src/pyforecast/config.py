@@ -59,12 +59,12 @@ class OutputConfig:
         products: Products to forecast (default: oil, gas)
         plots: Generate individual well plots (default: True)
         batch_plot: Generate batch overlay plot (default: True)
-        format: Export format - 'ac_forecast', 'ac_economic', or 'json' (default: ac_economic)
+        format: Export format - 'ac_economic' or 'json' (default: ac_economic)
     """
     products: list[Literal["oil", "gas", "water"]] = field(default_factory=lambda: ["oil", "gas", "water"])
     plots: bool = True
     batch_plot: bool = True
-    format: Literal["ac_forecast", "ac_economic", "json"] = "ac_economic"
+    format: Literal["ac_economic", "json"] = "ac_economic"
 
 
 @dataclass
@@ -425,7 +425,7 @@ output:
     - water
   plots: true             # Generate individual well plots
   batch_plot: true        # Generate multi-well overlay plot
-  format: ac_economic     # Export format: ac_forecast or ac_economic
+  format: ac_economic     # Export format: ac_economic or json
 
 # Data validation settings
 validation:

@@ -125,8 +125,8 @@ class TestProcessCommand:
             assert "wells" in data
             assert "config" in data
 
-    def test_process_ac_forecast_format(self):
-        """Test process with ac_forecast export format."""
+    def test_process_ac_economic_format(self):
+        """Test process with ac_economic export format."""
         with tempfile.TemporaryDirectory() as tmpdir:
             result = runner.invoke(
                 app,
@@ -134,14 +134,14 @@ class TestProcessCommand:
                     "process",
                     str(FIXTURES_DIR / "sample_enverus.csv"),
                     "-o", tmpdir,
-                    "--format", "ac_forecast",
+                    "--format", "ac_economic",
                     "--no-plots",
                     "--no-batch-plot",
                 ],
             )
 
             assert result.exit_code == 0
-            assert (Path(tmpdir) / "forecasts.csv").exists()
+            assert (Path(tmpdir) / "ac_economic.csv").exists()
 
     def test_process_invalid_format(self):
         """Test process with invalid format."""

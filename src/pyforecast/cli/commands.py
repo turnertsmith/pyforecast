@@ -70,7 +70,7 @@ def process(
         Optional[str],
         typer.Option(
             "--format",
-            help="Export format: ac_forecast, ac_economic, or json (overrides config)",
+            help="Export format: ac_economic or json (overrides config)",
         )
     ] = None,
     hindcast: Annotated[
@@ -168,8 +168,8 @@ def process(
     if no_batch_plot:
         pf_config.output.batch_plot = False
     if export_format:
-        if export_format not in ("ac_forecast", "ac_economic", "json"):
-            typer.echo(f"Error: Invalid format '{export_format}'. Must be ac_forecast, ac_economic, or json.", err=True)
+        if export_format not in ("ac_economic", "json"):
+            typer.echo(f"Error: Invalid format '{export_format}'. Must be ac_economic or json.", err=True)
             raise typer.Exit(1)
         pf_config.output.format = export_format  # type: ignore
 
