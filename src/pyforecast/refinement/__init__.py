@@ -48,7 +48,12 @@ from .hindcast import HindcastValidator
 from .residual_analysis import ResidualAnalyzer
 from .fit_logger import FitLogger, DataQualityThresholds
 from .parameter_learning import ParameterLearner
-from .ground_truth import GroundTruthValidator, GroundTruthConfig, summarize_ground_truth_results
+from .ground_truth import (
+    GroundTruthValidator,
+    GroundTruthConfig,
+    GroundTruthSummary,
+    summarize_ground_truth_results,
+)
 
 __all__ = [
     # Data classes
@@ -67,5 +72,6 @@ __all__ = [
     # Ground truth comparison
     "GroundTruthValidator",
     "GroundTruthConfig",
+    "GroundTruthSummary",
     "summarize_ground_truth_results",
 ]

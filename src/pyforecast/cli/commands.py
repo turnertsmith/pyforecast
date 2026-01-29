@@ -109,6 +109,27 @@ def process(
             help="Months to compare forecasts against ground truth",
         )
     ] = 60,
+    gt_plots: Annotated[
+        bool,
+        typer.Option(
+            "--gt-plots",
+            help="Generate comparison plots for each well (requires matplotlib)",
+        )
+    ] = False,
+    gt_lazy: Annotated[
+        bool,
+        typer.Option(
+            "--gt-lazy",
+            help="Stream ARIES file instead of loading into memory (for large files)",
+        )
+    ] = False,
+    gt_workers: Annotated[
+        int,
+        typer.Option(
+            "--gt-workers",
+            help="Number of parallel workers for ground truth validation (default: 1 = sequential)",
+        )
+    ] = 1,
 ) -> None:
     """Process production data and generate decline forecasts.
 
@@ -230,10 +251,11 @@ def process(
         from ..refinement.ground_truth import GroundTruthValidator, GroundTruthConfig
 
         typer.echo("Running ground truth comparison...")
-        aries_importer = AriesForecastImporter()
+        aries_importer = AriesForecastImporter(lazy=gt_lazy)
         try:
             count = aries_importer.load(gt_file)
-            typer.echo(f"  Loaded {count} ARIES forecasts from {gt_file}")
+            mode_str = " (lazy mode)" if gt_lazy else ""
+            typer.echo(f"  Loaded {count} ARIES forecasts from {gt_file}{mode_str}")
         except Exception as e:
             typer.echo(f"  Error loading ARIES file: {e}", err=True)
             aries_importer = None
@@ -242,11 +264,22 @@ def process(
             gt_config = GroundTruthConfig(comparison_months=gt_comparison_months)
             gt_validator = GroundTruthValidator(aries_importer, gt_config)
 
-            for well in result.wells:
-                for prod in pf_config.output.products:
-                    gt_result = gt_validator.validate(well, prod)
-                    if gt_result is not None:
-                        gt_results.append(gt_result)
+            if gt_workers > 1:
+                # Parallel validation
+                typer.echo(f"  Using {gt_workers} parallel workers")
+                gt_summary_result = gt_validator.validate_batch_parallel(
+                    result.wells,
+                    pf_config.output.products,
+                    max_workers=gt_workers,
+                )
+                gt_results = gt_summary_result.results
+            else:
+                # Sequential validation
+                for well in result.wells:
+                    for prod in pf_config.output.products:
+                        gt_result = gt_validator.validate(well, prod)
+                        if gt_result is not None:
+                            gt_results.append(gt_result)
 
     # Report results
     typer.echo("")
@@ -310,11 +343,22 @@ def process(
         typer.echo(f"  Average correlation: {gt_summary['avg_correlation']:.3f}")
         typer.echo(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%")
 
-        # Save ground truth report and CSV
+        # Save ground truth report, CSV, and time-series
         _save_ground_truth_report(gt_results, gt_summary, output)
         _save_ground_truth_csv(gt_results, output)
+        _save_ground_truth_timeseries(gt_results, output)
         typer.echo(f"\n  See {output}/ground_truth_report.txt for details")
         typer.echo(f"  CSV export: {output}/ground_truth_results.csv")
+        typer.echo(f"  Time-series: {output}/ground_truth_timeseries.csv")
+
+        # Generate plots if requested
+        if gt_plots:
+            try:
+                from ..refinement.plotting import plot_all_comparisons
+                plot_count = plot_all_comparisons(gt_results, output)
+                typer.echo(f"  Generated {plot_count} comparison plots in {output}/ground_truth_plots/")
+            except ImportError:
+                typer.echo("  Warning: matplotlib not installed, skipping plot generation", err=True)
 
     typer.echo(f"\nOutput saved to: {output}/")
 
@@ -1021,6 +1065,57 @@ def calibrate_regime(
                 "results": results,
             }, f, indent=2)
         typer.echo(f"\nCalibration results saved to: {output}")
+
+
+def _save_ground_truth_timeseries(
+    results: list,
+    output_dir: Path,
+) -> None:
+    """Save ground truth time-series data for plotting.
+
+    Exports the forecast arrays (ARIES vs pyforecast) to CSV
+    for external visualization.
+
+    Args:
+        results: List of GroundTruthResult objects
+        output_dir: Output directory
+    """
+    import csv
+
+    csv_path = output_dir / "ground_truth_timeseries.csv"
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "well_id",
+            "product",
+            "month",
+            "aries_rate",
+            "pyf_rate",
+            "diff",
+            "pct_diff",
+        ])
+
+        for r in results:
+            # Skip if arrays are empty
+            if len(r.forecast_months) == 0:
+                continue
+
+            for i, month in enumerate(r.forecast_months):
+                aries_rate = r.aries_rates[i]
+                pyf_rate = r.pyf_rates[i]
+                diff = pyf_rate - aries_rate
+                pct_diff = (diff / aries_rate * 100) if aries_rate > 0.1 else 0.0
+
+                writer.writerow([
+                    r.well_id,
+                    r.product,
+                    int(month),
+                    round(aries_rate, 4),
+                    round(pyf_rate, 4),
+                    round(diff, 4),
+                    round(pct_diff, 2),
+                ])
 
 
 def _save_ground_truth_csv(

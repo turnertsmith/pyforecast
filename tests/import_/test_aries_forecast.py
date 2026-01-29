@@ -485,3 +485,168 @@ class TestAriesForecastImporter:
             assert ('4212345678', 'oil') in importer
         finally:
             filepath.unlink()
+
+
+class TestParseFailureLogging:
+    """Tests for parse failure logging."""
+
+    def test_parse_failures_tracked(self):
+        """Test that unparseable expressions are tracked."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            # Valid expression
+            writer.writerow(['well-1', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            # Invalid expression
+            writer.writerow(['well-2', 'GAS', 'INVALID EXPRESSION'])
+            # Another invalid one
+            writer.writerow(['well-3', 'OIL', 'not parseable at all'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter()
+            importer.load(filepath)
+
+            # Should have tracked 2 failures
+            failures = importer.parse_failures
+            assert len(failures) == 2
+
+            # Check failure details
+            well_ids = [f[0] for f in failures]
+            assert 'well-2' in well_ids
+            assert 'well-3' in well_ids
+        finally:
+            filepath.unlink()
+
+    def test_parse_failures_returns_copy(self):
+        """Test that parse_failures returns a copy."""
+        importer = AriesForecastImporter()
+        failures1 = importer.parse_failures
+        failures2 = importer.parse_failures
+
+        assert failures1 is not failures2
+
+    def test_empty_expression_not_tracked_as_failure(self):
+        """Test that empty expressions are not tracked as failures."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            writer.writerow(['well-1', 'OIL', ''])  # Empty
+            writer.writerow(['well-2', 'GAS', '   '])  # Whitespace only
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter()
+            importer.load(filepath)
+
+            # Empty expressions should not be tracked as failures
+            assert len(importer.parse_failures) == 0
+        finally:
+            filepath.unlink()
+
+
+class TestLazyLoading:
+    """Tests for lazy loading mode."""
+
+    def test_lazy_mode_loads_count(self):
+        """Test that lazy mode counts forecasts without loading."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            writer.writerow(['well-1', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            writer.writerow(['well-2', 'GAS', '5000 X M/M 6 HYP B/0.75 12'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter(lazy=True)
+            count = importer.load(filepath)
+
+            assert count == 2
+            # Internal forecasts dict should be empty in lazy mode
+            assert len(importer._forecasts) == 0
+        finally:
+            filepath.unlink()
+
+    def test_lazy_mode_get_finds_data(self):
+        """Test that lazy mode get() streams to find data."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            writer.writerow(['well-1', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            writer.writerow(['well-2', 'GAS', '5000 X M/M 6 HYP B/0.75 12'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter(lazy=True)
+            importer.load(filepath)
+
+            # Should find data by streaming
+            params = importer.get('well-1', 'oil')
+            assert params is not None
+            assert params.b == 0.50
+
+            params = importer.get('well-2', 'gas')
+            assert params is not None
+            assert params.b == 0.75
+
+            # Non-existent should return None
+            assert importer.get('well-3', 'oil') is None
+        finally:
+            filepath.unlink()
+
+    def test_lazy_mode_list_wells(self):
+        """Test that lazy mode can list wells."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            writer.writerow(['well-a', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            writer.writerow(['well-b', 'OIL', '500 X B/M 6 HYP B/0.75 10'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter(lazy=True)
+            importer.load(filepath)
+
+            wells = importer.list_wells()
+            assert 'well-a' in wells
+            assert 'well-b' in wells
+        finally:
+            filepath.unlink()
+
+    def test_eager_mode_same_results(self):
+        """Test that eager and lazy modes return same results."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            writer.writerow(['well-1', 'OIL', '1000 X B/M 6 EXP B/0.50 8.5'])
+            filepath = Path(f.name)
+
+        try:
+            eager = AriesForecastImporter(lazy=False)
+            eager.load(filepath)
+
+            lazy = AriesForecastImporter(lazy=True)
+            lazy.load(filepath)
+
+            eager_params = eager.get('well-1', 'oil')
+            lazy_params = lazy.get('well-1', 'oil')
+
+            assert eager_params is not None
+            assert lazy_params is not None
+            assert eager_params.qi == pytest.approx(lazy_params.qi, rel=0.001)
+            assert eager_params.di == pytest.approx(lazy_params.di, rel=0.001)
+            assert eager_params.b == lazy_params.b
+        finally:
+            filepath.unlink()

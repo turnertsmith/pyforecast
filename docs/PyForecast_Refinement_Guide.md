@@ -414,6 +414,15 @@ pyforecast process data.csv --ground-truth aries_projections.csv -o output/
 
 # With custom comparison period (default: 60 months)
 pyforecast process data.csv --ground-truth aries_projections.csv --gt-months 120 -o output/
+
+# Generate comparison plots for each well
+pyforecast process data.csv --ground-truth aries_projections.csv --gt-plots -o output/
+
+# Use lazy loading for large ARIES files (streams instead of loading into memory)
+pyforecast process data.csv --ground-truth large_aries.csv --gt-lazy -o output/
+
+# Enable parallel validation for large batches
+pyforecast process data.csv --ground-truth aries_projections.csv --gt-workers 4 -o output/
 ```
 
 ### Example Output
@@ -447,6 +456,7 @@ Wells are graded A-D based on overall match quality:
 | **B** | Good match - minor deviations |
 | **C** | Fair match - some significant differences |
 | **D** | Poor match - review recommended |
+| **X** | Insufficient data - MAPE could not be calculated |
 
 ### Quality Threshold (is_good_match)
 
@@ -528,6 +538,96 @@ Supported unit codes:
 - `M/M` - mcf/month (gas)
 - `M/D` - mcf/day (gas)
 
+### Advanced Features
+
+#### Rate Validation
+
+Forecast rate arrays are automatically validated for problematic values:
+- **NaN values** are replaced with 0 and logged as warnings
+- **Infinite values** are clipped to 1e9 and logged as warnings
+- **Negative values** are clipped to 0 and logged as warnings
+
+This prevents silent calculation errors in metrics.
+
+#### MAPE Edge Case Handling
+
+When insufficient valid data points exist (fewer than 3 points above the 0.1 rate threshold), MAPE returns `None` instead of an incorrect value:
+- `mape_valid` property indicates if MAPE was successfully calculated
+- `is_good_match` returns `False` when MAPE is unavailable
+- `match_grade` returns `"X"` for insufficient data
+
+#### Identifier Mismatch Logging
+
+The `validate_batch()` method tracks wells that exist in only one dataset:
+- `wells_in_pyf_only`: Wells with pyforecast data but no ARIES data
+- `wells_in_aries_only`: Wells with ARIES data but not in pyforecast batch
+
+This helps diagnose ID normalization issues.
+
+#### Parse Failure Logging
+
+Unparseable ARIES expressions are logged with warnings and tracked:
+
+```python
+importer = AriesForecastImporter()
+importer.load("aries_projections.csv")
+
+# Access parse failures
+for well_id, product, expression in importer.parse_failures:
+    print(f"Failed to parse {well_id}/{product}: '{expression}'")
+```
+
+#### Time-Series Export
+
+Forecast arrays are exported to `ground_truth_timeseries.csv` for external visualization:
+
+| Column | Description |
+|--------|-------------|
+| well_id | Well identifier |
+| product | Product type (oil/gas/water) |
+| month | Forecast month (0-based) |
+| aries_rate | ARIES forecast rate |
+| pyf_rate | pyforecast forecast rate |
+| diff | Rate difference (pyf - aries) |
+| pct_diff | Percentage difference |
+
+#### Comparison Plots
+
+Generate overlay plots with the `--gt-plots` flag:
+
+```bash
+pyforecast process data.csv --ground-truth aries.csv --gt-plots -o output/
+```
+
+Plots are saved to `output/ground_truth_plots/` with one PNG per well/product showing:
+- ARIES curve (blue solid line)
+- pyforecast curve (red dashed line)
+- Metrics text box (MAPE, correlation, grade)
+
+#### Lazy Loading
+
+For large ARIES files (10,000+ wells), use lazy mode to reduce memory usage:
+
+```bash
+pyforecast process data.csv --ground-truth large_aries.csv --gt-lazy -o output/
+```
+
+In lazy mode:
+- File is validated and rows counted during `load()`
+- Data is streamed from disk on each `get()` call
+- Uses constant memory regardless of file size
+- Slower per-lookup but suitable for memory-constrained environments
+
+#### Parallel Validation
+
+For large batches, enable parallel validation:
+
+```bash
+pyforecast process data.csv --ground-truth aries.csv --gt-workers 4 -o output/
+```
+
+Uses `ThreadPoolExecutor` with configurable worker count. Default is 1 (sequential).
+
 ---
 
 ## Regime Detection Calibration
@@ -593,7 +693,23 @@ refinement:
 
   # Parameter learning
   enable_learning: false
+
+  # Ground truth comparison
+  ground_truth_file: null      # ARIES AC_ECONOMIC CSV for comparison
+  ground_truth_months: 60      # Months to compare forecasts
+  ground_truth_lazy: false     # Stream file instead of loading into memory
+  ground_truth_workers: 1      # Parallel workers (1 = sequential)
 ```
+
+### Ground Truth CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ground-truth PATH` | - | ARIES AC_ECONOMIC CSV file for comparison |
+| `--gt-months N` | 60 | Months to compare forecasts |
+| `--gt-plots` | off | Generate comparison plots for each well |
+| `--gt-lazy` | off | Stream ARIES file instead of loading into memory |
+| `--gt-workers N` | 1 | Number of parallel workers for validation |
 
 ---
 
@@ -701,6 +817,17 @@ from pyforecast.refinement import (
     ParameterLearner,        # Parameter suggestions
     GroundTruthValidator,    # Ground truth comparison
     GroundTruthConfig,       # Ground truth configuration
+    GroundTruthSummary,      # Batch validation summary with mismatch info
+    summarize_ground_truth_results,  # Aggregate statistics
+)
+```
+
+### Plotting
+
+```python
+from pyforecast.refinement.plotting import (
+    plot_ground_truth_comparison,  # Single well plot
+    plot_all_comparisons,          # Batch plot generation
 )
 ```
 

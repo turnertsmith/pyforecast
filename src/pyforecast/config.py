@@ -118,6 +118,8 @@ class RefinementConfig:
     # Ground truth comparison
     ground_truth_file: str | None = None  # ARIES AC_ECONOMIC CSV
     ground_truth_months: int = 60  # Months to compare
+    ground_truth_lazy: bool = False  # Stream file instead of loading into memory
+    ground_truth_workers: int = 1  # Parallel workers (1 = sequential)
 
 
 @dataclass
@@ -357,6 +359,8 @@ class PyForecastConfig:
                 "min_r_squared_for_logging": self.refinement.min_r_squared_for_logging,
                 "ground_truth_file": self.refinement.ground_truth_file,
                 "ground_truth_months": self.refinement.ground_truth_months,
+                "ground_truth_lazy": self.refinement.ground_truth_lazy,
+                "ground_truth_workers": self.refinement.ground_truth_workers,
             },
         }
 
@@ -452,6 +456,8 @@ refinement:
   min_r_squared_for_logging: 0    # Min R² for logging (0 = no limit)
   ground_truth_file: null         # ARIES AC_ECONOMIC CSV for comparison
   ground_truth_months: 60         # Months to compare forecasts
+  ground_truth_lazy: false        # Stream file instead of loading into memory
+  ground_truth_workers: 1         # Parallel workers (1 = sequential)
 """
 
     with open(filepath, "w") as f:

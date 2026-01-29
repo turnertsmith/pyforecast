@@ -504,7 +504,7 @@ class GroundTruthResult:
 
     # Forecast comparison metrics
     comparison_months: int
-    mape: float
+    mape: float | None  # None when insufficient valid data points
     correlation: float
     bias: float
     cumulative_diff_pct: float
@@ -513,6 +513,18 @@ class GroundTruthResult:
     forecast_months: np.ndarray = field(default_factory=lambda: np.array([]))
     aries_rates: np.ndarray = field(default_factory=lambda: np.array([]))
     pyf_rates: np.ndarray = field(default_factory=lambda: np.array([]))
+
+    @property
+    def mape_valid(self) -> bool:
+        """Check if MAPE was successfully calculated.
+
+        MAPE may be None when there are insufficient valid data points
+        (fewer than 3 points above the minimum rate threshold).
+
+        Returns:
+            True if MAPE is available
+        """
+        return self.mape is not None
 
     @property
     def is_good_match(self) -> bool:
@@ -524,9 +536,13 @@ class GroundTruthResult:
         - Cumulative diff < 15% (total volumes are similar)
         - b-factor diff < 0.3 (decline shape is similar)
 
+        Returns None MAPE as a failed match (insufficient data).
+
         Returns:
             True if all criteria are met
         """
+        if self.mape is None:
+            return False
         return (
             self.mape < 20.0
             and self.correlation > 0.95
@@ -539,8 +555,13 @@ class GroundTruthResult:
         """Return a grade for the match quality.
 
         Returns:
-            "A" (excellent), "B" (good), "C" (fair), or "D" (poor)
+            "A" (excellent), "B" (good), "C" (fair), "D" (poor),
+            or "X" (insufficient data - MAPE unavailable)
         """
+        # Return X grade if MAPE couldn't be calculated
+        if self.mape is None:
+            return "X"
+
         score = 0
 
         # MAPE scoring

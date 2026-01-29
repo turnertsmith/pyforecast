@@ -4,6 +4,8 @@ Compares pyforecast's auto-fitted decline curves against expert/approved
 ARIES forecasts to measure fitting accuracy.
 """
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,6 +19,8 @@ if TYPE_CHECKING:
 
 from ..import_.aries_forecast import normalize_well_id
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class GroundTruthConfig:
@@ -26,6 +30,22 @@ class GroundTruthConfig:
         comparison_months: Number of months to compare forecasts (default 60)
     """
     comparison_months: int = 60
+
+
+@dataclass
+class GroundTruthSummary:
+    """Summary of ground truth comparison batch results.
+
+    Attributes:
+        results: List of individual comparison results
+        wells_matched: Number of wells successfully matched
+        wells_in_pyf_only: Wells with pyforecast data but no ARIES data
+        wells_in_aries_only: Wells with ARIES data but not in pyforecast batch
+    """
+    results: list[GroundTruthResult]
+    wells_matched: int
+    wells_in_pyf_only: list[str]
+    wells_in_aries_only: list[str]
 
 
 class GroundTruthValidator:
@@ -124,6 +144,10 @@ class GroundTruthValidator:
         aries_model = self.importer.to_model(aries_params)
         aries_rates = aries_model.rate(t)
 
+        # Validate rates for NaN, infinite, or negative values
+        pyf_rates = self._validate_rates(pyf_rates, f"{well.well_id}/pyforecast")
+        aries_rates = self._validate_rates(aries_rates, f"{well.well_id}/ARIES")
+
         # Calculate comparison metrics
         mape = self._calculate_mape(aries_rates, pyf_rates)
         correlation = self._calculate_correlation(aries_rates, pyf_rates)
@@ -160,11 +184,53 @@ class GroundTruthValidator:
             pyf_rates=pyf_rates,
         )
 
+    def _validate_rates(
+        self,
+        rates: np.ndarray,
+        source: str,
+    ) -> np.ndarray:
+        """Validate and clean rate array.
+
+        Checks for NaN, infinite, and negative values, logging warnings
+        for any issues found and applying fixes.
+
+        Args:
+            rates: Array of forecast rates to validate
+            source: Description of data source for log messages
+
+        Returns:
+            Cleaned rate array with invalid values replaced
+        """
+        rates = rates.copy()
+
+        if np.any(np.isnan(rates)):
+            nan_count = np.sum(np.isnan(rates))
+            logger.warning(
+                f"{source}: {nan_count} NaN values in forecast rates, replacing with 0"
+            )
+            rates = np.nan_to_num(rates, nan=0.0)
+
+        if np.any(np.isinf(rates)):
+            inf_count = np.sum(np.isinf(rates))
+            logger.warning(
+                f"{source}: {inf_count} infinite values in forecast rates, clipping"
+            )
+            rates = np.clip(rates, 0, 1e9)
+
+        if np.any(rates < 0):
+            neg_count = np.sum(rates < 0)
+            logger.warning(
+                f"{source}: {neg_count} negative rates detected, clipping to 0"
+            )
+            rates = np.maximum(rates, 0)
+
+        return rates
+
     def _calculate_mape(
         self,
         actual: np.ndarray,
         predicted: np.ndarray,
-    ) -> float:
+    ) -> float | None:
         """Calculate Mean Absolute Percentage Error.
 
         Args:
@@ -172,12 +238,19 @@ class GroundTruthValidator:
             predicted: Predicted (pyforecast) values
 
         Returns:
-            MAPE as percentage
+            MAPE as percentage, or None if insufficient valid data points
+            (fewer than 3 points above minimum rate threshold)
         """
         # Avoid division by zero
         mask = actual > 0.1  # Minimum rate threshold
-        if not np.any(mask):
-            return 0.0
+        valid_count = np.sum(mask)
+
+        if valid_count < 3:
+            logger.warning(
+                f"Insufficient valid data points for MAPE calculation: "
+                f"{valid_count} points above threshold (need 3)"
+            )
+            return None
 
         abs_pct_error = np.abs((predicted[mask] - actual[mask]) / actual[mask])
         return float(np.mean(abs_pct_error) * 100)
@@ -227,6 +300,144 @@ class GroundTruthValidator:
         mean_diff = np.mean(predicted - actual)
         return float(mean_diff / mean_actual)
 
+    def validate_batch(
+        self,
+        wells: list["Well"],
+        products: list[str],
+    ) -> GroundTruthSummary:
+        """Validate all wells and return summary with mismatch info.
+
+        Args:
+            wells: List of wells with fitted forecasts
+            products: Products to validate (e.g., ["oil", "gas"])
+
+        Returns:
+            GroundTruthSummary with results and ID matching diagnostics
+        """
+        results = []
+
+        # Collect pyforecast well IDs (normalized)
+        pyf_ids: set[str] = set()
+        for well in wells:
+            propnum = (
+                well.identifier.propnum
+                or well.identifier.api
+                or well.identifier.entity_id
+            )
+            if propnum:
+                pyf_ids.add(normalize_well_id(propnum))
+
+        # Get ARIES well IDs
+        aries_ids = set(self.importer.list_wells())
+
+        # Find mismatches
+        wells_in_pyf_only = sorted(pyf_ids - aries_ids)
+        wells_in_aries_only = sorted(aries_ids - pyf_ids)
+
+        # Log mismatches if any
+        if wells_in_pyf_only:
+            logger.info(
+                f"Wells in pyforecast but not ARIES ({len(wells_in_pyf_only)}): "
+                f"{wells_in_pyf_only[:5]}{'...' if len(wells_in_pyf_only) > 5 else ''}"
+            )
+        if wells_in_aries_only:
+            logger.info(
+                f"Wells in ARIES but not pyforecast ({len(wells_in_aries_only)}): "
+                f"{wells_in_aries_only[:5]}{'...' if len(wells_in_aries_only) > 5 else ''}"
+            )
+
+        # Validate each well/product combination
+        for well in wells:
+            for product in products:
+                result = self.validate(well, product)
+                if result is not None:
+                    results.append(result)
+
+        return GroundTruthSummary(
+            results=results,
+            wells_matched=len(results),
+            wells_in_pyf_only=wells_in_pyf_only,
+            wells_in_aries_only=wells_in_aries_only,
+        )
+
+    def validate_batch_parallel(
+        self,
+        wells: list["Well"],
+        products: list[str],
+        max_workers: int = 4,
+    ) -> GroundTruthSummary:
+        """Validate all wells in parallel for large batches.
+
+        Uses ThreadPoolExecutor for concurrent validation. Provides
+        speedup for large datasets at the cost of slightly higher
+        memory usage.
+
+        Args:
+            wells: List of wells with fitted forecasts
+            products: Products to validate (e.g., ["oil", "gas"])
+            max_workers: Maximum number of parallel workers
+
+        Returns:
+            GroundTruthSummary with results and ID matching diagnostics
+        """
+        results: list[GroundTruthResult] = []
+
+        # Collect pyforecast well IDs (normalized)
+        pyf_ids: set[str] = set()
+        for well in wells:
+            propnum = (
+                well.identifier.propnum
+                or well.identifier.api
+                or well.identifier.entity_id
+            )
+            if propnum:
+                pyf_ids.add(normalize_well_id(propnum))
+
+        # Get ARIES well IDs
+        aries_ids = set(self.importer.list_wells())
+
+        # Find mismatches
+        wells_in_pyf_only = sorted(pyf_ids - aries_ids)
+        wells_in_aries_only = sorted(aries_ids - pyf_ids)
+
+        # Log mismatches if any
+        if wells_in_pyf_only:
+            logger.info(
+                f"Wells in pyforecast but not ARIES ({len(wells_in_pyf_only)}): "
+                f"{wells_in_pyf_only[:5]}{'...' if len(wells_in_pyf_only) > 5 else ''}"
+            )
+        if wells_in_aries_only:
+            logger.info(
+                f"Wells in ARIES but not pyforecast ({len(wells_in_aries_only)}): "
+                f"{wells_in_aries_only[:5]}{'...' if len(wells_in_aries_only) > 5 else ''}"
+            )
+
+        # Build list of tasks
+        tasks = [(well, product) for well in wells for product in products]
+
+        # Validate in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.validate, well, product): (well.well_id, product)
+                for well, product in tasks
+            }
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result is not None:
+                        results.append(result)
+                except Exception as e:
+                    well_id, product = futures[future]
+                    logger.warning(f"Validation failed for {well_id}/{product}: {e}")
+
+        return GroundTruthSummary(
+            results=results,
+            wells_matched=len(results),
+            wells_in_pyf_only=wells_in_pyf_only,
+            wells_in_aries_only=wells_in_aries_only,
+        )
+
 
 def summarize_ground_truth_results(
     results: list[GroundTruthResult],
@@ -249,27 +460,34 @@ def summarize_ground_truth_results(
             "good_match_count": 0,
             "good_match_pct": 0.0,
             "grade_distribution": {},
+            "mape_unavailable_count": 0,
         }
 
-    mapes = [r.mape for r in results]
+    # Filter out None MAPE values for statistics
+    valid_mapes = [r.mape for r in results if r.mape is not None]
+    mape_unavailable_count = len(results) - len(valid_mapes)
+
     correlations = [r.correlation for r in results]
     cum_diffs = [r.cumulative_diff_pct for r in results]
     good_matches = [r for r in results if r.is_good_match]
 
-    # Grade distribution
-    grades = {"A": 0, "B": 0, "C": 0, "D": 0}
+    # Grade distribution (includes "X" for insufficient data)
+    grades = {"A": 0, "B": 0, "C": 0, "D": 0, "X": 0}
     for r in results:
-        grades[r.match_grade] += 1
+        grade = r.match_grade
+        if grade in grades:
+            grades[grade] += 1
 
     return {
         "count": len(results),
-        "avg_mape": float(np.mean(mapes)),
-        "median_mape": float(np.median(mapes)),
+        "avg_mape": float(np.mean(valid_mapes)) if valid_mapes else None,
+        "median_mape": float(np.median(valid_mapes)) if valid_mapes else None,
         "avg_correlation": float(np.mean(correlations)),
         "avg_cumulative_diff_pct": float(np.mean(cum_diffs)),
         "good_match_count": len(good_matches),
         "good_match_pct": len(good_matches) / len(results) * 100,
         "grade_distribution": grades,
+        "mape_unavailable_count": mape_unavailable_count,
         "by_product": _summarize_by_product(results),
     }
 
@@ -284,12 +502,12 @@ def _summarize_by_product(results: list[GroundTruthResult]) -> dict:
         if not product_results:
             continue
 
-        mapes = [r.mape for r in product_results]
+        valid_mapes = [r.mape for r in product_results if r.mape is not None]
         good_matches = [r for r in product_results if r.is_good_match]
 
         by_product[product] = {
             "count": len(product_results),
-            "avg_mape": float(np.mean(mapes)),
+            "avg_mape": float(np.mean(valid_mapes)) if valid_mapes else None,
             "good_match_pct": len(good_matches) / len(product_results) * 100,
         }
 

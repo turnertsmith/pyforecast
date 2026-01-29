@@ -17,12 +17,15 @@ The parser converts all values to internal units (daily rates, monthly decline).
 """
 
 import csv
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from ..core.models import HyperbolicModel
+
+logger = logging.getLogger(__name__)
 
 
 # Average days per month for conversion
@@ -168,9 +171,19 @@ class AriesForecastImporter:
         "W/D": ("water", True),  # water barrels/day
     }
 
-    def __init__(self) -> None:
-        """Initialize the importer."""
+    def __init__(self, lazy: bool = False) -> None:
+        """Initialize the importer.
+
+        Args:
+            lazy: If True, stream through file on each lookup instead of
+                  loading all data into memory. Slower per-lookup but uses
+                  constant memory for large datasets.
+        """
         self._forecasts: dict[tuple[str, str], AriesForecastParams] = {}
+        self._parse_failures: list[tuple[str, str, str]] = []  # (well_id, product, expression)
+        self._lazy = lazy
+        self._filepath: Path | None = None
+        self._well_count: int = 0
 
     def load(self, filepath: Path | str) -> int:
         """Load ARIES forecasts from CSV file.
@@ -180,11 +193,14 @@ class AriesForecastImporter:
            where KEYWORD is OIL/GAS/WATER and EXPRESSION contains the decline params
         2. Flat format: PROPNUM with expression columns (OIL_EXPRESSION, etc.)
 
+        In lazy mode, only validates the file and counts wells without
+        loading data into memory. Actual parsing happens on get() calls.
+
         Args:
             filepath: Path to CSV file with ARIES expressions
 
         Returns:
-            Number of forecasts loaded
+            Number of forecasts loaded (or counted in lazy mode)
 
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -194,6 +210,49 @@ class AriesForecastImporter:
         if not filepath.exists():
             raise FileNotFoundError(f"ARIES forecast file not found: {filepath}")
 
+        self._filepath = filepath
+
+        if self._lazy:
+            # In lazy mode, just count rows and validate format
+            return self._count_and_validate(filepath)
+
+        # Eager mode: load all data into memory
+        return self._load_all(filepath)
+
+    def _count_and_validate(self, filepath: Path) -> int:
+        """Count forecasts without loading into memory (lazy mode)."""
+        count = 0
+        with open(filepath, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+
+            if reader.fieldnames is None:
+                raise ValueError("CSV file has no headers")
+
+            fieldnames_upper = [fn.strip().upper() for fn in reader.fieldnames]
+            is_ac_economic = "KEYWORD" in fieldnames_upper and "EXPRESSION" in fieldnames_upper
+
+            for row in reader:
+                row = {k.strip().upper(): v for k, v in row.items()}
+                propnum = self._get_propnum(row)
+                if not propnum:
+                    continue
+
+                if is_ac_economic:
+                    keyword = row.get("KEYWORD", "").strip().upper()
+                    expression = row.get("EXPRESSION", "").strip()
+                    if keyword in ("OIL", "GAS", "WATER") and expression:
+                        count += 1
+                else:
+                    # Count any non-empty expression-like values
+                    for col, value in row.items():
+                        if value and " X " in value.upper():
+                            count += 1
+
+        self._well_count = count
+        return count
+
+    def _load_all(self, filepath: Path) -> int:
+        """Load all forecasts into memory (eager mode)."""
         count = 0
         with open(filepath, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
@@ -243,7 +302,7 @@ class AriesForecastImporter:
         product_map = {"OIL": "oil", "GAS": "gas", "WATER": "water"}
         expected_product = product_map[keyword]
 
-        params = self._parse_expression(propnum, expression)
+        params = self._parse_expression(propnum, expression, product_hint=expected_product)
         if params is None:
             return 0
 
@@ -293,16 +352,21 @@ class AriesForecastImporter:
         self,
         propnum: str,
         expression: str,
+        product_hint: str | None = None,
     ) -> AriesForecastParams | None:
         """Parse ARIES expression into forecast parameters.
 
         Args:
             propnum: Well property number
             expression: ARIES expression string
+            product_hint: Optional product type for logging context
 
         Returns:
             AriesForecastParams if parsed successfully, None otherwise
         """
+        if not expression or not expression.strip():
+            return None
+
         # Try main pattern first
         match = self.EXPRESSION_PATTERN.match(expression)
         if match:
@@ -313,6 +377,12 @@ class AriesForecastImporter:
         if match:
             return self._build_params(propnum, match, has_type=False)
 
+        # Log parse failure
+        product_str = product_hint or "unknown"
+        self._parse_failures.append((propnum, product_str, expression))
+        logger.warning(
+            f"Failed to parse ARIES expression for {propnum}/{product_str}: '{expression}'"
+        )
         return None
 
     def _build_params(
@@ -377,6 +447,8 @@ class AriesForecastImporter:
         The propnum is normalized before lookup to handle API format variations
         (e.g., "42-123-45678" matches "4212345678").
 
+        In lazy mode, streams through the file on each call.
+
         Args:
             propnum: Well property number or API
             product: Product type (oil, gas, water)
@@ -385,7 +457,72 @@ class AriesForecastImporter:
             AriesForecastParams if found, None otherwise
         """
         normalized_id = normalize_well_id(propnum)
+
+        if self._lazy and self._filepath:
+            return self._stream_find(normalized_id, product)
+
         return self._forecasts.get((normalized_id, product))
+
+    def _stream_find(
+        self,
+        normalized_id: str,
+        product: str,
+    ) -> AriesForecastParams | None:
+        """Stream through file to find specific well/product (lazy mode)."""
+        if self._filepath is None:
+            return None
+
+        with open(self._filepath, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+
+            if reader.fieldnames is None:
+                return None
+
+            fieldnames_upper = [fn.strip().upper() for fn in reader.fieldnames]
+            is_ac_economic = "KEYWORD" in fieldnames_upper and "EXPRESSION" in fieldnames_upper
+
+            for row in reader:
+                row = {k.strip().upper(): v for k, v in row.items()}
+                propnum = self._get_propnum(row)
+                if not propnum:
+                    continue
+
+                if normalize_well_id(propnum) != normalized_id:
+                    continue
+
+                if is_ac_economic:
+                    keyword = row.get("KEYWORD", "").strip().upper()
+                    expression = row.get("EXPRESSION", "").strip()
+
+                    if keyword not in ("OIL", "GAS", "WATER"):
+                        continue
+
+                    product_map = {"OIL": "oil", "GAS": "gas", "WATER": "water"}
+                    if product_map[keyword] != product:
+                        continue
+
+                    params = self._parse_expression(propnum, expression, product_hint=product)
+                    if params:
+                        # Override product based on keyword
+                        return AriesForecastParams(
+                            propnum=params.propnum,
+                            product=product,
+                            qi=params.qi,
+                            di=params.di,
+                            b=params.b,
+                            dmin=params.dmin,
+                            decline_type=params.decline_type,
+                        )
+                else:
+                    # Flat format - try to find matching product
+                    for col, value in row.items():
+                        if not value or not value.strip():
+                            continue
+                        params = self._parse_expression(propnum, value.strip())
+                        if params and params.product == product:
+                            return params
+
+        return None
 
     def to_model(self, params: AriesForecastParams) -> HyperbolicModel:
         """Convert ARIES parameters to HyperbolicModel.
@@ -404,8 +541,33 @@ class AriesForecastImporter:
         )
 
     def list_wells(self) -> list[str]:
-        """List all unique well IDs loaded (normalized form)."""
+        """List all unique well IDs loaded (normalized form).
+
+        In lazy mode, streams through the file to collect well IDs.
+        """
+        if self._lazy and self._filepath:
+            return self._stream_list_wells()
         return sorted(set(propnum for propnum, _ in self._forecasts.keys()))
+
+    def _stream_list_wells(self) -> list[str]:
+        """Stream through file to list wells (lazy mode)."""
+        if self._filepath is None:
+            return []
+
+        well_ids: set[str] = set()
+        with open(self._filepath, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+
+            if reader.fieldnames is None:
+                return []
+
+            for row in reader:
+                row = {k.strip().upper(): v for k, v in row.items()}
+                propnum = self._get_propnum(row)
+                if propnum:
+                    well_ids.add(normalize_well_id(propnum))
+
+        return sorted(well_ids)
 
     def list_products(self, propnum: str) -> list[str]:
         """List products available for a well."""
@@ -413,6 +575,15 @@ class AriesForecastImporter:
         return sorted(
             product for p, product in self._forecasts.keys() if p == normalized_id
         )
+
+    @property
+    def parse_failures(self) -> list[tuple[str, str, str]]:
+        """Return list of expressions that failed to parse.
+
+        Returns:
+            List of (well_id, product, expression) tuples that couldn't be parsed
+        """
+        return self._parse_failures.copy()
 
     def __len__(self) -> int:
         """Return number of loaded forecasts."""

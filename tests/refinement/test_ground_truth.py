@@ -12,6 +12,7 @@ import numpy as np
 from pyforecast.refinement.ground_truth import (
     GroundTruthValidator,
     GroundTruthConfig,
+    GroundTruthSummary,
     summarize_ground_truth_results,
 )
 from pyforecast.refinement.schemas import GroundTruthResult
@@ -515,3 +516,293 @@ class TestSummarizeGroundTruthResults:
         assert "grade_distribution" in summary
         assert summary["grade_distribution"]["A"] >= 1
         assert summary["grade_distribution"]["D"] >= 1
+
+
+class TestGroundTruthResultMapeHandling:
+    """Tests for MAPE edge case handling."""
+
+    def test_mape_valid_property(self):
+        """Test mape_valid property returns correct value."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=10.0,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=5.0,
+        )
+        assert result.mape_valid is True
+
+    def test_mape_valid_false_when_none(self):
+        """Test mape_valid returns False when MAPE is None."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=None,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=5.0,
+        )
+        assert result.mape_valid is False
+
+    def test_is_good_match_false_when_mape_none(self):
+        """Test is_good_match returns False when MAPE is None."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=None,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=5.0,
+        )
+        assert result.is_good_match is False
+
+    def test_match_grade_x_when_mape_none(self):
+        """Test match_grade returns X when MAPE is None."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=None,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=5.0,
+        )
+        assert result.match_grade == "X"
+
+
+class TestSummaryWithNoneMape:
+    """Tests for summary functions with None MAPE values."""
+
+    def test_summary_filters_none_mapes(self):
+        """Test that summary calculates averages excluding None MAPEs."""
+        results = [
+            GroundTruthResult(
+                well_id="well-1",
+                product="oil",
+                aries_qi=100.0,
+                aries_di=0.01,
+                aries_b=0.5,
+                aries_decline_type="HYP",
+                pyf_qi=100.0,
+                pyf_di=0.01,
+                pyf_b=0.5,
+                qi_pct_diff=0.0,
+                di_pct_diff=0.0,
+                b_abs_diff=0.0,
+                comparison_months=60,
+                mape=10.0,
+                correlation=0.99,
+                bias=0.0,
+                cumulative_diff_pct=5.0,
+            ),
+            GroundTruthResult(
+                well_id="well-2",
+                product="oil",
+                aries_qi=100.0,
+                aries_di=0.01,
+                aries_b=0.5,
+                aries_decline_type="HYP",
+                pyf_qi=100.0,
+                pyf_di=0.01,
+                pyf_b=0.5,
+                qi_pct_diff=0.0,
+                di_pct_diff=0.0,
+                b_abs_diff=0.0,
+                comparison_months=60,
+                mape=None,  # Insufficient data
+                correlation=0.99,
+                bias=0.0,
+                cumulative_diff_pct=5.0,
+            ),
+            GroundTruthResult(
+                well_id="well-3",
+                product="oil",
+                aries_qi=100.0,
+                aries_di=0.01,
+                aries_b=0.5,
+                aries_decline_type="HYP",
+                pyf_qi=100.0,
+                pyf_di=0.01,
+                pyf_b=0.5,
+                qi_pct_diff=0.0,
+                di_pct_diff=0.0,
+                b_abs_diff=0.0,
+                comparison_months=60,
+                mape=20.0,
+                correlation=0.99,
+                bias=0.0,
+                cumulative_diff_pct=5.0,
+            ),
+        ]
+
+        summary = summarize_ground_truth_results(results)
+
+        # Average should be (10 + 20) / 2 = 15, not (10 + 0 + 20) / 3
+        assert summary["avg_mape"] == 15.0
+        assert summary["mape_unavailable_count"] == 1
+        assert summary["grade_distribution"]["X"] == 1
+
+
+class TestValidateBatch:
+    """Tests for validate_batch method."""
+
+    def _create_mock_well(self, well_id, propnum, qi=100.0, di=0.01, b=0.5):
+        """Create a mock well with forecast."""
+        well = MagicMock()
+        well.well_id = well_id
+        well.identifier.propnum = propnum
+        well.identifier.api = None
+        well.identifier.entity_id = None
+
+        model = HyperbolicModel(qi=qi, di=di, b=b, dmin=0.005)
+        forecast = MagicMock()
+        forecast.model = model
+        well.get_forecast.return_value = forecast
+        return well
+
+    def test_validate_batch_returns_summary(self):
+        """Test that validate_batch returns GroundTruthSummary."""
+        importer = AriesForecastImporter()
+        params = AriesForecastParams(
+            propnum="test-well",
+            product="oil",
+            qi=100.0,
+            di=0.01,
+            b=0.5,
+            dmin=0.005,
+            decline_type="HYP",
+        )
+        importer._forecasts[("test-well", "oil")] = params
+
+        well = self._create_mock_well("test-well", "test-well")
+        validator = GroundTruthValidator(importer)
+
+        summary = validator.validate_batch([well], ["oil"])
+
+        assert isinstance(summary, GroundTruthSummary)
+        assert summary.wells_matched == 1
+        assert len(summary.results) == 1
+
+    def test_validate_batch_tracks_mismatches(self):
+        """Test that validate_batch tracks ID mismatches."""
+        importer = AriesForecastImporter()
+        # Add ARIES data for a well NOT in pyforecast batch
+        params = AriesForecastParams(
+            propnum="aries-only-well",
+            product="oil",
+            qi=100.0,
+            di=0.01,
+            b=0.5,
+            dmin=0.005,
+            decline_type="HYP",
+        )
+        importer._forecasts[("aries-only-well", "oil")] = params
+
+        # Create pyforecast well NOT in ARIES
+        well = self._create_mock_well("pyf-only-well", "pyf-only-well")
+
+        validator = GroundTruthValidator(importer)
+        summary = validator.validate_batch([well], ["oil"])
+
+        assert "pyf-only-well" in summary.wells_in_pyf_only
+        assert "aries-only-well" in summary.wells_in_aries_only
+        assert summary.wells_matched == 0
+
+
+class TestRateValidation:
+    """Tests for rate array validation."""
+
+    def _create_importer_with_params(self, propnum, product, qi=100.0, di=0.01, b=0.5):
+        """Create an importer with specific parameters."""
+        importer = AriesForecastImporter()
+        params = AriesForecastParams(
+            propnum=propnum,
+            product=product,
+            qi=qi,
+            di=di,
+            b=b,
+            dmin=0.005,
+            decline_type="HYP",
+        )
+        importer._forecasts[(propnum, product)] = params
+        return importer
+
+    def test_validate_rates_handles_nan(self):
+        """Test that _validate_rates replaces NaN with 0."""
+        importer = self._create_importer_with_params("test", "oil")
+        validator = GroundTruthValidator(importer)
+
+        rates = np.array([100.0, np.nan, 80.0, np.nan])
+        cleaned = validator._validate_rates(rates, "test")
+
+        assert not np.any(np.isnan(cleaned))
+        assert cleaned[1] == 0.0
+        assert cleaned[3] == 0.0
+
+    def test_validate_rates_handles_inf(self):
+        """Test that _validate_rates clips infinite values."""
+        importer = self._create_importer_with_params("test", "oil")
+        validator = GroundTruthValidator(importer)
+
+        rates = np.array([100.0, np.inf, 80.0, -np.inf])
+        cleaned = validator._validate_rates(rates, "test")
+
+        assert not np.any(np.isinf(cleaned))
+        assert cleaned[1] <= 1e9
+        assert cleaned[3] >= 0
+
+    def test_validate_rates_handles_negative(self):
+        """Test that _validate_rates clips negative values to 0."""
+        importer = self._create_importer_with_params("test", "oil")
+        validator = GroundTruthValidator(importer)
+
+        rates = np.array([100.0, -50.0, 80.0, -10.0])
+        cleaned = validator._validate_rates(rates, "test")
+
+        assert not np.any(cleaned < 0)
+        assert cleaned[1] == 0.0
+        assert cleaned[3] == 0.0
