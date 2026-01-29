@@ -1,7 +1,7 @@
 """Tests for fit log storage."""
 
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -276,3 +276,222 @@ class TestFitLogStorage:
 
         storage.clear()
         assert storage.count() == 0
+
+    def test_insert_with_update_mode(self, temp_db):
+        """Test upsert behavior with on_conflict='update'."""
+        storage = FitLogStorage(temp_db)
+
+        # Insert initial record
+        timestamp = datetime.now()
+        record1 = FitLogRecord(
+            well_id="well_1",
+            product="oil",
+            timestamp=timestamp,
+            qi=100.0,
+            r_squared=0.90,
+        )
+        storage.insert(record1, on_conflict="update")
+        original_fit_id = record1.fit_id
+
+        # Insert updated record with same well_id, product, same day
+        record2 = FitLogRecord(
+            well_id="well_1",
+            product="oil",
+            timestamp=timestamp,
+            qi=150.0,  # Updated value
+            r_squared=0.95,  # Updated value
+        )
+        storage.insert(record2, on_conflict="update")
+
+        # Should still have only 1 record
+        results = storage.query(well_id="well_1")
+        assert len(results) == 1
+
+        # Values should be updated
+        assert results[0].qi == 150.0
+        assert results[0].r_squared == 0.95
+
+        # Fit ID should be preserved from original
+        assert results[0].fit_id == original_fit_id
+
+    def test_insert_with_skip_mode(self, temp_db):
+        """Test skip behavior with on_conflict='skip'."""
+        storage = FitLogStorage(temp_db)
+
+        # Insert initial record
+        timestamp = datetime.now()
+        record1 = FitLogRecord(
+            well_id="well_1",
+            product="oil",
+            timestamp=timestamp,
+            qi=100.0,
+        )
+        result1 = storage.insert(record1, on_conflict="skip")
+        assert result1 is True
+
+        # Try to insert duplicate - should be skipped
+        record2 = FitLogRecord(
+            well_id="well_1",
+            product="oil",
+            timestamp=timestamp,
+            qi=200.0,  # Different value
+        )
+        result2 = storage.insert(record2, on_conflict="skip")
+        assert result2 is False
+
+        # Should still have only 1 record with original value
+        results = storage.query(well_id="well_1")
+        assert len(results) == 1
+        assert results[0].qi == 100.0
+
+    def test_insert_batch_with_update_mode(self, temp_db):
+        """Test batch insert with update mode."""
+        storage = FitLogStorage(temp_db)
+
+        # Insert initial records
+        timestamp = datetime.now()
+        records1 = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=timestamp, qi=100.0),
+            FitLogRecord(well_id="w2", product="oil", timestamp=timestamp, qi=200.0),
+        ]
+        storage.insert_batch(records1, on_conflict="update")
+
+        # Insert updates and new record
+        records2 = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=timestamp, qi=150.0),  # Update
+            FitLogRecord(well_id="w3", product="oil", timestamp=timestamp, qi=300.0),  # New
+        ]
+        count = storage.insert_batch(records2, on_conflict="update")
+        assert count == 2
+
+        # Should have 3 total records
+        assert storage.count() == 3
+
+        # w1 should be updated
+        w1_results = storage.query(well_id="w1")
+        assert len(w1_results) == 1
+        assert w1_results[0].qi == 150.0
+
+    def test_insert_batch_with_skip_mode(self, temp_db):
+        """Test batch insert with skip mode."""
+        storage = FitLogStorage(temp_db)
+
+        # Insert initial records
+        timestamp = datetime.now()
+        records1 = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=timestamp, qi=100.0),
+            FitLogRecord(well_id="w2", product="oil", timestamp=timestamp, qi=200.0),
+        ]
+        storage.insert_batch(records1, on_conflict="skip")
+
+        # Try to insert duplicates and new record
+        records2 = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=timestamp, qi=150.0),  # Duplicate
+            FitLogRecord(well_id="w3", product="oil", timestamp=timestamp, qi=300.0),  # New
+        ]
+        count = storage.insert_batch(records2, on_conflict="skip")
+        assert count == 1  # Only w3 should be inserted
+
+        # Should have 3 total records
+        assert storage.count() == 3
+
+        # w1 should still have original value
+        w1_results = storage.query(well_id="w1")
+        assert len(w1_results) == 1
+        assert w1_results[0].qi == 100.0
+
+    def test_query_with_date_range(self, temp_db):
+        """Test query with start_date and end_date filters."""
+        storage = FitLogStorage(temp_db)
+
+        # Insert records with different timestamps
+        base_date = datetime(2024, 1, 15)
+        records = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=base_date - timedelta(days=10)),
+            FitLogRecord(well_id="w2", product="oil", timestamp=base_date),
+            FitLogRecord(well_id="w3", product="oil", timestamp=base_date + timedelta(days=10)),
+        ]
+        storage.insert_batch(records)
+
+        # Query with start_date only
+        results = storage.query(start_date=base_date)
+        assert len(results) == 2
+        well_ids = {r.well_id for r in results}
+        assert well_ids == {"w2", "w3"}
+
+        # Query with end_date only
+        results = storage.query(end_date=base_date)
+        assert len(results) == 2
+        well_ids = {r.well_id for r in results}
+        assert well_ids == {"w1", "w2"}
+
+        # Query with both
+        results = storage.query(
+            start_date=base_date - timedelta(days=5),
+            end_date=base_date + timedelta(days=5),
+        )
+        assert len(results) == 1
+        assert results[0].well_id == "w2"
+
+    def test_count_with_date_range(self, temp_db):
+        """Test count with date range filters."""
+        storage = FitLogStorage(temp_db)
+
+        base_date = datetime(2024, 1, 15)
+        records = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=base_date - timedelta(days=10)),
+            FitLogRecord(well_id="w2", product="oil", timestamp=base_date),
+            FitLogRecord(well_id="w3", product="oil", timestamp=base_date + timedelta(days=10)),
+        ]
+        storage.insert_batch(records)
+
+        assert storage.count(start_date=base_date) == 2
+        assert storage.count(end_date=base_date) == 2
+        assert storage.count(start_date=base_date, end_date=base_date) == 1
+
+    def test_get_statistics_with_date_range(self, temp_db):
+        """Test get_statistics with date range filters."""
+        storage = FitLogStorage(temp_db)
+
+        base_date = datetime(2024, 1, 15)
+        records = [
+            FitLogRecord(
+                well_id="w1", product="oil",
+                timestamp=base_date - timedelta(days=10),
+                r_squared=0.80,
+            ),
+            FitLogRecord(
+                well_id="w2", product="oil",
+                timestamp=base_date,
+                r_squared=0.90,
+            ),
+            FitLogRecord(
+                well_id="w3", product="oil",
+                timestamp=base_date + timedelta(days=10),
+                r_squared=0.95,
+            ),
+        ]
+        storage.insert_batch(records)
+
+        # Stats for recent records only
+        stats = storage.get_statistics(start_date=base_date)
+        assert stats["count"] == 2
+        assert stats["avg_r_squared"] == pytest.approx(0.925, rel=0.01)
+
+    def test_iterate_all_with_date_range(self, temp_db):
+        """Test iterate_all with date range filters."""
+        storage = FitLogStorage(temp_db)
+
+        base_date = datetime(2024, 1, 15)
+        records = [
+            FitLogRecord(well_id="w1", product="oil", timestamp=base_date - timedelta(days=10)),
+            FitLogRecord(well_id="w2", product="oil", timestamp=base_date),
+            FitLogRecord(well_id="w3", product="oil", timestamp=base_date + timedelta(days=10)),
+        ]
+        storage.insert_batch(records)
+
+        # Iterate with date filter
+        iterated = list(storage.iterate_all(start_date=base_date))
+        assert len(iterated) == 2
+        well_ids = {r.well_id for r in iterated}
+        assert well_ids == {"w2", "w3"}

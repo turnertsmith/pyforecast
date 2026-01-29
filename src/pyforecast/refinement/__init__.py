@@ -45,7 +45,7 @@ from .schemas import (
 from .storage import FitLogStorage
 from .hindcast import HindcastValidator
 from .residual_analysis import ResidualAnalyzer
-from .fit_logger import FitLogger
+from .fit_logger import FitLogger, DataQualityThresholds
 from .parameter_learning import ParameterLearner
 
 __all__ = [
@@ -53,6 +53,7 @@ __all__ = [
     "FitLogRecord",
     "HindcastResult",
     "ResidualDiagnostics",
+    "DataQualityThresholds",
     # Storage
     "FitLogStorage",
     # Validators and analyzers

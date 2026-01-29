@@ -4,6 +4,7 @@ Logs all fit parameters, metrics, and optional diagnostics to persistent
 storage for analysis and learning.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
@@ -18,6 +19,54 @@ if TYPE_CHECKING:
     from ..data.well import Well
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DataQualityThresholds:
+    """Configurable quality thresholds for fit logging.
+
+    Fits that don't meet these thresholds will not be logged,
+    preventing low-quality data from polluting the fit log database.
+
+    Attributes:
+        min_data_points: Minimum data points required to log a fit
+        max_coefficient_of_variation: Maximum CV to accept (0 = no limit)
+        min_r_squared: Minimum R-squared to accept (0 = no limit)
+    """
+    min_data_points: int = 6
+    max_coefficient_of_variation: float = 0.0  # 0 = no limit
+    min_r_squared: float = 0.0  # 0 = no limit
+
+    def passes(
+        self,
+        data_points: int,
+        r_squared: float,
+        coefficient_of_variation: float | None = None,
+    ) -> tuple[bool, str | None]:
+        """Check if a fit meets quality thresholds.
+
+        Args:
+            data_points: Number of data points used in fit
+            r_squared: R-squared value of fit
+            coefficient_of_variation: CV of residuals (optional)
+
+        Returns:
+            Tuple of (passes, reason) where reason explains failure
+        """
+        if data_points < self.min_data_points:
+            return False, f"Insufficient data points: {data_points} < {self.min_data_points}"
+
+        if self.min_r_squared > 0 and r_squared < self.min_r_squared:
+            return False, f"R-squared too low: {r_squared:.3f} < {self.min_r_squared}"
+
+        if (
+            self.max_coefficient_of_variation > 0
+            and coefficient_of_variation is not None
+            and coefficient_of_variation > self.max_coefficient_of_variation
+        ):
+            return False, f"CV too high: {coefficient_of_variation:.2f} > {self.max_coefficient_of_variation}"
+
+        return True, None
 
 
 class FitLogger:
@@ -35,6 +84,10 @@ class FitLogger:
         # Log with hindcast results
         logger.log(fit_result, well, "oil", fitting_config, hindcast=hindcast_result)
 
+        # Log with quality thresholds
+        thresholds = DataQualityThresholds(min_data_points=12, min_r_squared=0.7)
+        logger = FitLogger(quality_thresholds=thresholds)
+
         # Flush batch to storage
         logger.flush()
     """
@@ -43,16 +96,20 @@ class FitLogger:
         self,
         storage_path: Path | str | None = None,
         batch_size: int = 100,
+        quality_thresholds: DataQualityThresholds | None = None,
     ):
         """Initialize fit logger.
 
         Args:
             storage_path: Path to storage file (None = default location)
             batch_size: Number of records to batch before writing
+            quality_thresholds: Optional quality thresholds for filtering fits
         """
         self.storage = FitLogStorage(storage_path)
         self.batch_size = batch_size
+        self.quality_thresholds = quality_thresholds
         self._batch: list[FitLogRecord] = []
+        self._skipped_count: int = 0
 
     def log(
         self,
@@ -64,7 +121,7 @@ class FitLogger:
         residuals: ResidualDiagnostics | None = None,
         basin: str | None = None,
         formation: str | None = None,
-    ) -> FitLogRecord:
+    ) -> FitLogRecord | None:
         """Log a fit result.
 
         Args:
@@ -78,7 +135,7 @@ class FitLogger:
             formation: Optional formation name from well metadata
 
         Returns:
-            FitLogRecord that was logged
+            FitLogRecord that was logged, or None if quality thresholds not met
         """
         # Extract basin/formation from well metadata if not provided
         if basin is None:
@@ -89,6 +146,24 @@ class FitLogger:
         # Get total data points
         t = well.production.time_months
         data_points_total = len(t)
+
+        # Check quality thresholds if configured
+        if self.quality_thresholds is not None:
+            cv = None
+            if residuals is not None and residuals.mean != 0:
+                cv = abs(residuals.std / residuals.mean) if residuals.mean else None
+
+            passes, reason = self.quality_thresholds.passes(
+                data_points=fit_result.data_points_used,
+                r_squared=fit_result.r_squared,
+                coefficient_of_variation=cv,
+            )
+            if not passes:
+                self._skipped_count += 1
+                logger.debug(
+                    f"Skipping fit log for {well.well_id}/{product}: {reason}"
+                )
+                return None
 
         # Create record
         record = FitLogRecord(
@@ -148,7 +223,7 @@ class FitLogger:
         residuals: ResidualDiagnostics | None = None,
         basin: str | None = None,
         formation: str | None = None,
-    ) -> FitLogRecord:
+    ) -> FitLogRecord | None:
         """Log a fit result without a Well object.
 
         Useful for logging from batch processing where Well may not be available.
@@ -165,8 +240,26 @@ class FitLogger:
             formation: Optional formation name
 
         Returns:
-            FitLogRecord that was logged
+            FitLogRecord that was logged, or None if quality thresholds not met
         """
+        # Check quality thresholds if configured
+        if self.quality_thresholds is not None:
+            cv = None
+            if residuals is not None and residuals.mean != 0:
+                cv = abs(residuals.std / residuals.mean) if residuals.mean else None
+
+            passes, reason = self.quality_thresholds.passes(
+                data_points=fit_result.data_points_used,
+                r_squared=fit_result.r_squared,
+                coefficient_of_variation=cv,
+            )
+            if not passes:
+                self._skipped_count += 1
+                logger.debug(
+                    f"Skipping fit log for {well_id}/{product}: {reason}"
+                )
+                return None
+
         record = FitLogRecord(
             timestamp=datetime.now(),
             well_id=well_id,
@@ -240,6 +333,11 @@ class FitLogger:
     def pending_count(self) -> int:
         """Number of records waiting to be flushed."""
         return len(self._batch)
+
+    @property
+    def skipped_count(self) -> int:
+        """Number of records skipped due to quality thresholds."""
+        return self._skipped_count
 
 
 class FitLogAnalyzer:

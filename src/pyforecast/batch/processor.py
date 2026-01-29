@@ -2,8 +2,10 @@
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Literal, TYPE_CHECKING
+from typing import Callable, Literal, TYPE_CHECKING
+import json
 import logging
 
 from tqdm import tqdm
@@ -171,6 +173,79 @@ class RefinementOptions:
     enable_residuals: bool = False
     hindcast_holdout_months: int = 6
     min_training_months: int = 12
+
+
+@dataclass
+class CheckpointState:
+    """State for resumable batch processing.
+
+    Captures the progress of a batch job so it can be resumed after failure.
+
+    Attributes:
+        total_wells: Total number of wells to process
+        processed_well_ids: Set of well IDs that have been processed
+        successful: Count of successfully fitted wells
+        failed: Count of failed fits
+        skipped: Count of wells skipped (insufficient data)
+        errors: List of (well_id, error_message) tuples
+        started_at: Timestamp when processing started
+        last_updated_at: Timestamp of last checkpoint update
+    """
+    total_wells: int = 0
+    processed_well_ids: set[str] = field(default_factory=set)
+    successful: int = 0
+    failed: int = 0
+    skipped: int = 0
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    started_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    last_updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "total_wells": self.total_wells,
+            "processed_well_ids": list(self.processed_well_ids),
+            "successful": self.successful,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "started_at": self.started_at,
+            "last_updated_at": self.last_updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CheckpointState":
+        """Create from dictionary."""
+        return cls(
+            total_wells=data.get("total_wells", 0),
+            processed_well_ids=set(data.get("processed_well_ids", [])),
+            successful=data.get("successful", 0),
+            failed=data.get("failed", 0),
+            skipped=data.get("skipped", 0),
+            errors=[(e[0], e[1]) for e in data.get("errors", [])],
+            started_at=data.get("started_at", datetime.now().isoformat()),
+            last_updated_at=data.get("last_updated_at", datetime.now().isoformat()),
+        )
+
+    def save(self, filepath: Path) -> None:
+        """Save checkpoint to JSON file."""
+        self.last_updated_at = datetime.now().isoformat()
+        with open(filepath, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, filepath: Path) -> "CheckpointState":
+        """Load checkpoint from JSON file."""
+        with open(filepath) as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
+    @property
+    def progress_pct(self) -> float:
+        """Percentage of wells processed."""
+        if self.total_wells == 0:
+            return 0.0
+        return len(self.processed_well_ids) / self.total_wells * 100
 
 
 @dataclass
@@ -494,6 +569,193 @@ class BatchProcessor:
             failed=failed,
             skipped=skipped,
             errors=all_errors,
+            validation_results=all_validation_results,
+            refinement_results=all_refinement_results,
+        )
+
+    def process_with_checkpoint(
+        self,
+        wells: list[Well],
+        checkpoint_file: Path | str,
+        show_progress: bool = True,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        checkpoint_interval: int = 10,
+    ) -> BatchResult:
+        """Process wells with checkpoint/resume capability.
+
+        If processing fails partway through, can resume from the last checkpoint
+        by passing the same checkpoint file.
+
+        Args:
+            wells: List of wells to process
+            checkpoint_file: Path to checkpoint file (JSON)
+            show_progress: Whether to show progress bar
+            progress_callback: Optional callback(processed, total, well_id) for progress
+            checkpoint_interval: Save checkpoint every N wells processed
+
+        Returns:
+            BatchResult with processed wells and statistics
+        """
+        checkpoint_file = Path(checkpoint_file)
+
+        # Load or create checkpoint
+        if checkpoint_file.exists():
+            checkpoint = CheckpointState.load(checkpoint_file)
+            logger.info(
+                f"Resuming from checkpoint: {len(checkpoint.processed_well_ids)}/{checkpoint.total_wells} "
+                f"wells already processed ({checkpoint.progress_pct:.1f}%)"
+            )
+        else:
+            checkpoint = CheckpointState(total_wells=len(wells))
+
+        # Filter wells - skip already processed and insufficient data
+        remaining_wells = []
+        skipped_this_run = 0
+        for well in wells:
+            if well.well_id in checkpoint.processed_well_ids:
+                continue
+            if well.has_sufficient_data(self.config.min_points):
+                remaining_wells.append(well)
+            else:
+                skipped_this_run += 1
+                checkpoint.skipped += 1
+                checkpoint.processed_well_ids.add(well.well_id)
+                logger.debug(f"Skipping {well.well_id}: insufficient data")
+
+        if not remaining_wells:
+            # All wells already processed or skipped
+            return BatchResult(
+                wells=[],
+                successful=checkpoint.successful,
+                failed=checkpoint.failed,
+                skipped=checkpoint.skipped,
+                errors=checkpoint.errors,
+            )
+
+        # Build per-product configs
+        product_configs = {
+            product: self.config.get_fitting_config(product)
+            for product in self.config.products
+        }
+
+        # Get validation config if available
+        validation_config = None
+        if self.config.pyforecast_config is not None:
+            validation_config = self.config.pyforecast_config.validation
+
+        # Get refinement options if enabled
+        refinement_options = None
+        refinement_enabled = False
+        if self.config.pyforecast_config is not None:
+            ref_config = self.config.pyforecast_config.refinement
+            if ref_config.enable_hindcast or ref_config.enable_residual_analysis:
+                refinement_enabled = True
+                refinement_options = RefinementOptions(
+                    enable_hindcast=ref_config.enable_hindcast,
+                    enable_residuals=ref_config.enable_residual_analysis,
+                    hindcast_holdout_months=ref_config.hindcast_holdout_months,
+                    min_training_months=ref_config.min_training_months,
+                )
+
+        processed_wells = []
+        all_validation_results = {}
+        all_refinement_results = RefinementResults() if refinement_enabled else None
+        wells_since_checkpoint = 0
+
+        # Process in parallel
+        workers = self.config.workers
+        if workers is None:
+            import os
+            workers = min(os.cpu_count() or 4, len(remaining_wells))
+
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        _fit_single_well,
+                        well,
+                        self.config.products,
+                        product_configs,
+                        validation_config,
+                        refinement_options,
+                    ): well.well_id
+                    for well in remaining_wells
+                }
+
+                iterator = as_completed(futures)
+                if show_progress:
+                    iterator = tqdm(
+                        iterator,
+                        total=len(futures),
+                        desc="Fitting wells",
+                        initial=len(checkpoint.processed_well_ids) - checkpoint.skipped,
+                    )
+
+                for future in iterator:
+                    well_id = futures[future]
+                    try:
+                        well, errors, validation_result, refinement_result = future.result()
+                        processed_wells.append(well)
+                        all_validation_results[well_id] = validation_result
+                        checkpoint.processed_well_ids.add(well_id)
+
+                        # Collect refinement results
+                        if refinement_result is not None and all_refinement_results is not None:
+                            for product, hindcast in refinement_result.hindcast_results.items():
+                                all_refinement_results.hindcast_results[(well_id, product)] = hindcast
+                            for product, diagnostics in refinement_result.residual_diagnostics.items():
+                                all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
+
+                        if errors:
+                            checkpoint.errors.extend((well_id, e) for e in errors)
+                            has_forecast = any(
+                                well.get_forecast(p) is not None
+                                for p in self.config.products
+                            )
+                            if has_forecast:
+                                checkpoint.successful += 1
+                            else:
+                                checkpoint.failed += 1
+                        else:
+                            checkpoint.successful += 1
+
+                        # Progress callback
+                        if progress_callback:
+                            progress_callback(
+                                len(checkpoint.processed_well_ids),
+                                checkpoint.total_wells,
+                                well_id,
+                            )
+
+                        # Periodic checkpoint save
+                        wells_since_checkpoint += 1
+                        if wells_since_checkpoint >= checkpoint_interval:
+                            checkpoint.save(checkpoint_file)
+                            wells_since_checkpoint = 0
+
+                    except Exception as e:
+                        checkpoint.failed += 1
+                        checkpoint.errors.append((well_id, str(e)))
+                        checkpoint.processed_well_ids.add(well_id)
+                        logger.error(f"Failed to process {well_id}: {e}")
+
+                        # Save checkpoint on error
+                        checkpoint.save(checkpoint_file)
+
+        except KeyboardInterrupt:
+            logger.warning("Processing interrupted. Saving checkpoint...")
+            checkpoint.save(checkpoint_file)
+            raise
+
+        # Final checkpoint save
+        checkpoint.save(checkpoint_file)
+
+        return BatchResult(
+            wells=processed_wells,
+            successful=checkpoint.successful,
+            failed=checkpoint.failed,
+            skipped=checkpoint.skipped,
+            errors=checkpoint.errors,
             validation_results=all_validation_results,
             refinement_results=all_refinement_results,
         )

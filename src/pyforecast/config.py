@@ -84,6 +84,9 @@ class RefinementConfig:
         enable_residual_analysis: Compute residual diagnostics
         known_events_file: CSV file with known regime events for calibration
         enable_learning: Enable parameter learning/suggestions
+        min_data_points_for_logging: Minimum data points required to log a fit
+        max_coefficient_of_variation: Maximum CV to accept fit for logging (0 = no limit)
+        min_r_squared_for_logging: Minimum R-squared to accept fit for logging (0 = no limit)
     """
 
     # Logging settings
@@ -104,6 +107,11 @@ class RefinementConfig:
 
     # Parameter learning
     enable_learning: bool = False
+
+    # Data quality thresholds for logging
+    min_data_points_for_logging: int = 6
+    max_coefficient_of_variation: float = 0.0  # 0 = no limit
+    min_r_squared_for_logging: float = 0.0  # 0 = no limit
 
 
 @dataclass
@@ -338,6 +346,9 @@ class PyForecastConfig:
                 "enable_residual_analysis": self.refinement.enable_residual_analysis,
                 "known_events_file": self.refinement.known_events_file,
                 "enable_learning": self.refinement.enable_learning,
+                "min_data_points_for_logging": self.refinement.min_data_points_for_logging,
+                "max_coefficient_of_variation": self.refinement.max_coefficient_of_variation,
+                "min_r_squared_for_logging": self.refinement.min_r_squared_for_logging,
             },
         }
 
@@ -428,6 +439,9 @@ refinement:
   enable_residual_analysis: false # Compute residual diagnostics
   known_events_file: null         # CSV with known regime events
   enable_learning: false          # Enable parameter learning
+  min_data_points_for_logging: 6  # Min data points to log fit
+  max_coefficient_of_variation: 0 # Max CV for logging (0 = no limit)
+  min_r_squared_for_logging: 0    # Min R² for logging (0 = no limit)
 """
 
     with open(filepath, "w") as f:

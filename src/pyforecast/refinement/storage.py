@@ -4,9 +4,10 @@ Provides SQLite storage for persistent accumulation of fit metadata
 across all projects, enabling learning from historical fits.
 """
 
+from datetime import datetime
 from pathlib import Path
 import sqlite3
-from typing import Iterator
+from typing import Iterator, Literal
 import csv
 import logging
 
@@ -126,38 +127,162 @@ class FitLogStorage:
             conn.executescript(self.SCHEMA_SUGGESTIONS)
             conn.commit()
 
-    def insert(self, record: FitLogRecord) -> None:
+    def insert(
+        self,
+        record: FitLogRecord,
+        on_conflict: Literal["replace", "update", "skip"] = "replace",
+    ) -> bool:
         """Insert a fit log record.
 
         Args:
             record: FitLogRecord to insert
+            on_conflict: Behavior when record with same (well_id, product, timestamp) exists:
+                - "replace": Replace entire record (default, original behavior)
+                - "update": Update existing record, keeping fit_id
+                - "skip": Skip if duplicate exists
+
+        Returns:
+            True if record was inserted/updated, False if skipped
         """
         data = record.to_dict()
 
-        columns = list(data.keys())
-        placeholders = ["?" for _ in columns]
+        if on_conflict == "update":
+            return self._upsert_record(data)
+        elif on_conflict == "skip":
+            return self._insert_if_not_exists(data)
+        else:
+            # Original behavior: INSERT OR REPLACE by fit_id
+            columns = list(data.keys())
+            placeholders = ["?" for _ in columns]
 
-        sql = f"""
-        INSERT OR REPLACE INTO fit_logs ({', '.join(columns)})
-        VALUES ({', '.join(placeholders)})
+            sql = f"""
+            INSERT OR REPLACE INTO fit_logs ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            """
+
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(sql, list(data.values()))
+                conn.commit()
+            return True
+
+    def _upsert_record(self, data: dict) -> bool:
+        """Insert or update record by (well_id, product, timestamp) composite key.
+
+        If a record with the same well_id, product, and timestamp (within 1 second)
+        already exists, update it instead of creating a duplicate.
+
+        Args:
+            data: Record data dictionary
+
+        Returns:
+            True if record was inserted/updated
         """
+        well_id = data["well_id"]
+        product = data["product"]
+        timestamp = data["timestamp"]
 
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(sql, list(data.values()))
-            conn.commit()
+            conn.row_factory = sqlite3.Row
 
-    def insert_batch(self, records: list[FitLogRecord]) -> int:
+            # Check for existing record with same well_id, product, and similar timestamp
+            # Use date comparison (same day) to handle slight timestamp variations
+            existing_sql = """
+            SELECT fit_id FROM fit_logs
+            WHERE well_id = ? AND product = ?
+            AND date(timestamp) = date(?)
+            """
+            cursor = conn.execute(existing_sql, (well_id, product, timestamp))
+            existing = cursor.fetchone()
+
+            if existing:
+                # Update existing record, keeping original fit_id
+                existing_fit_id = existing["fit_id"]
+                update_data = {k: v for k, v in data.items() if k != "fit_id"}
+
+                set_clause = ", ".join(f"{k} = ?" for k in update_data.keys())
+                update_sql = f"""
+                UPDATE fit_logs SET {set_clause}
+                WHERE fit_id = ?
+                """
+                conn.execute(update_sql, list(update_data.values()) + [existing_fit_id])
+            else:
+                # Insert new record
+                columns = list(data.keys())
+                placeholders = ["?" for _ in columns]
+                insert_sql = f"""
+                INSERT INTO fit_logs ({', '.join(columns)})
+                VALUES ({', '.join(placeholders)})
+                """
+                conn.execute(insert_sql, list(data.values()))
+
+            conn.commit()
+        return True
+
+    def _insert_if_not_exists(self, data: dict) -> bool:
+        """Insert record only if no duplicate exists.
+
+        Args:
+            data: Record data dictionary
+
+        Returns:
+            True if record was inserted, False if duplicate exists
+        """
+        well_id = data["well_id"]
+        product = data["product"]
+        timestamp = data["timestamp"]
+
+        with sqlite3.connect(self.db_path) as conn:
+            # Check for existing record
+            existing_sql = """
+            SELECT 1 FROM fit_logs
+            WHERE well_id = ? AND product = ?
+            AND date(timestamp) = date(?)
+            """
+            cursor = conn.execute(existing_sql, (well_id, product, timestamp))
+
+            if cursor.fetchone():
+                return False  # Duplicate exists, skip
+
+            # Insert new record
+            columns = list(data.keys())
+            placeholders = ["?" for _ in columns]
+            insert_sql = f"""
+            INSERT INTO fit_logs ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            """
+            conn.execute(insert_sql, list(data.values()))
+            conn.commit()
+        return True
+
+    def insert_batch(
+        self,
+        records: list[FitLogRecord],
+        on_conflict: Literal["replace", "update", "skip"] = "replace",
+    ) -> int:
         """Insert multiple fit log records.
 
         Args:
             records: List of FitLogRecords to insert
+            on_conflict: Behavior when record with same (well_id, product, timestamp) exists:
+                - "replace": Replace entire record (default, original behavior)
+                - "update": Update existing record, keeping fit_id
+                - "skip": Skip if duplicate exists
 
         Returns:
-            Number of records inserted
+            Number of records inserted/updated (excludes skipped records)
         """
         if not records:
             return 0
 
+        if on_conflict in ("update", "skip"):
+            # Use individual upsert logic for each record
+            count = 0
+            for record in records:
+                if self.insert(record, on_conflict=on_conflict):
+                    count += 1
+            return count
+
+        # Original behavior: INSERT OR REPLACE by fit_id
         data = records[0].to_dict()
         columns = list(data.keys())
         placeholders = ["?" for _ in columns]
@@ -181,6 +306,8 @@ class FitLogStorage:
         basin: str | None = None,
         formation: str | None = None,
         min_r_squared: float | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         limit: int | None = None,
     ) -> list[FitLogRecord]:
         """Query fit log records with optional filters.
@@ -191,6 +318,8 @@ class FitLogStorage:
             basin: Filter by basin
             formation: Filter by formation
             min_r_squared: Minimum R-squared threshold
+            start_date: Filter records on or after this date
+            end_date: Filter records on or before this date
             limit: Maximum number of records to return
 
         Returns:
@@ -214,6 +343,12 @@ class FitLogStorage:
         if min_r_squared is not None:
             conditions.append("r_squared >= ?")
             params.append(min_r_squared)
+        if start_date is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_date.isoformat())
+        if end_date is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_date.isoformat())
 
         sql = "SELECT * FROM fit_logs"
         if conditions:
@@ -229,21 +364,42 @@ class FitLogStorage:
 
         return [FitLogRecord.from_dict(dict(row)) for row in rows]
 
-    def iterate_all(self, batch_size: int = 1000) -> Iterator[FitLogRecord]:
+    def iterate_all(
+        self,
+        batch_size: int = 1000,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> Iterator[FitLogRecord]:
         """Iterate over all records in batches.
 
         Args:
             batch_size: Number of records per batch
+            start_date: Filter records on or after this date
+            end_date: Filter records on or before this date
 
         Yields:
             FitLogRecord objects
         """
+        conditions = []
+        params = []
+
+        if start_date is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_date.isoformat())
+        if end_date is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_date.isoformat())
+
+        where_clause = ""
+        if conditions:
+            where_clause = " WHERE " + " AND ".join(conditions)
+
         offset = 0
         while True:
-            sql = f"SELECT * FROM fit_logs ORDER BY timestamp LIMIT {batch_size} OFFSET {offset}"
+            sql = f"SELECT * FROM fit_logs{where_clause} ORDER BY timestamp LIMIT {batch_size} OFFSET {offset}"
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute(sql)
+                cursor = conn.execute(sql, params)
                 rows = cursor.fetchall()
 
             if not rows:
@@ -259,6 +415,8 @@ class FitLogStorage:
         basin: str | None = None,
         formation: str | None = None,
         product: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
     ) -> int:
         """Count records matching filters.
 
@@ -266,6 +424,8 @@ class FitLogStorage:
             basin: Filter by basin
             formation: Filter by formation
             product: Filter by product
+            start_date: Filter records on or after this date
+            end_date: Filter records on or before this date
 
         Returns:
             Count of matching records
@@ -282,6 +442,12 @@ class FitLogStorage:
         if product is not None:
             conditions.append("product = ?")
             params.append(product)
+        if start_date is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_date.isoformat())
+        if end_date is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_date.isoformat())
 
         sql = "SELECT COUNT(*) FROM fit_logs"
         if conditions:
@@ -296,6 +462,8 @@ class FitLogStorage:
         basin: str | None = None,
         formation: str | None = None,
         product: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
     ) -> dict:
         """Get aggregate statistics for matching records.
 
@@ -303,6 +471,8 @@ class FitLogStorage:
             basin: Filter by basin
             formation: Filter by formation
             product: Filter by product
+            start_date: Filter records on or after this date
+            end_date: Filter records on or before this date
 
         Returns:
             Dictionary with statistics (count, avg_r_squared, avg_mape, etc.)
@@ -319,6 +489,12 @@ class FitLogStorage:
         if product is not None:
             conditions.append("product = ?")
             params.append(product)
+        if start_date is not None:
+            conditions.append("timestamp >= ?")
+            params.append(start_date.isoformat())
+        if end_date is not None:
+            conditions.append("timestamp <= ?")
+            params.append(end_date.isoformat())
 
         where_clause = ""
         if conditions:
