@@ -128,12 +128,14 @@ class Well:
         production: Historical production data
         forecast_oil: Forecast result for oil (if fitted)
         forecast_gas: Forecast result for gas (if fitted)
+        forecast_water: Forecast result for water (if fitted)
         metadata: Additional well metadata
     """
     identifier: WellIdentifier
     production: ProductionData
     forecast_oil: ForecastResult | None = None
     forecast_gas: ForecastResult | None = None
+    forecast_water: ForecastResult | None = None
     metadata: dict = field(default_factory=dict)
 
     @property
@@ -152,7 +154,7 @@ class Well:
         """
         return self.production.n_months >= min_months
 
-    def get_forecast(self, product: Literal["oil", "gas"]) -> ForecastResult | None:
+    def get_forecast(self, product: Literal["oil", "gas", "water"]) -> ForecastResult | None:
         """Get forecast result for specified product.
 
         Args:
@@ -165,9 +167,11 @@ class Well:
             return self.forecast_oil
         elif product == "gas":
             return self.forecast_gas
+        elif product == "water":
+            return self.forecast_water
         return None
 
-    def set_forecast(self, product: Literal["oil", "gas"], result: ForecastResult) -> None:
+    def set_forecast(self, product: Literal["oil", "gas", "water"], result: ForecastResult) -> None:
         """Set forecast result for specified product.
 
         Args:
@@ -178,3 +182,5 @@ class Well:
             self.forecast_oil = result
         elif product == "gas":
             self.forecast_gas = result
+        elif product == "water":
+            self.forecast_water = result

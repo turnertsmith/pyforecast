@@ -134,6 +134,8 @@ class AriesAcEconomicExporter:
                 products.append("oil")
             if well.forecast_gas is not None:
                 products.append("gas")
+            if well.forecast_water is not None:
+                products.append("water")
 
         rows = []
         propnum = well.identifier.propnum or well.identifier.api or well.identifier.primary_id
