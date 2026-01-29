@@ -15,9 +15,17 @@ from ..core.models import ForecastResult
 from ..export.aries_export import AriesExporter
 from ..export.aries_ac_economic import AriesAcEconomicExporter
 from ..visualization.plots import DeclinePlotter
+from ..validation import (
+    ValidationResult,
+    InputValidator,
+    DataQualityValidator,
+    FittingValidator,
+    IssueCategory,
+    IssueSeverity,
+)
 
 if TYPE_CHECKING:
-    from ..config import PyForecastConfig
+    from ..config import PyForecastConfig, ValidationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -74,30 +82,97 @@ class BatchResult:
         failed: Count of failed fits
         skipped: Count of wells skipped (insufficient data)
         errors: List of (well_id, error_message) tuples
+        validation_results: Dict of well_id -> ValidationResult
     """
     wells: list[Well]
     successful: int
     failed: int
     skipped: int
     errors: list[tuple[str, str]]
+    validation_results: dict[str, ValidationResult] = field(default_factory=dict)
+
+    def get_validation_summary(self) -> dict:
+        """Get summary of validation results.
+
+        Returns:
+            Dict with counts by severity and category
+        """
+        summary = {
+            "wells_with_errors": 0,
+            "wells_with_warnings": 0,
+            "total_errors": 0,
+            "total_warnings": 0,
+            "by_category": {},
+        }
+
+        for result in self.validation_results.values():
+            if result.has_errors:
+                summary["wells_with_errors"] += 1
+            if result.has_warnings:
+                summary["wells_with_warnings"] += 1
+            summary["total_errors"] += result.error_count
+            summary["total_warnings"] += result.warning_count
+
+            for issue in result.issues:
+                cat_name = issue.category.name
+                if cat_name not in summary["by_category"]:
+                    summary["by_category"][cat_name] = 0
+                summary["by_category"][cat_name] += 1
+
+        return summary
 
 
 def _fit_single_well(
     well: Well,
     products: list[str],
-    product_configs: dict[str, FittingConfig]
-) -> tuple[Well, list[str]]:
+    product_configs: dict[str, FittingConfig],
+    validation_config: "ValidationConfig | None" = None,
+) -> tuple[Well, list[str], ValidationResult]:
     """Fit decline curves for a single well (worker function).
 
     Args:
         well: Well object with production data
         products: Products to fit
         product_configs: Dict of product -> FittingConfig
+        validation_config: Optional validation configuration
 
     Returns:
-        Tuple of (well with forecasts, list of error messages)
+        Tuple of (well with forecasts, list of error messages, validation result)
     """
     errors = []
+    validation_result = ValidationResult(well_id=well.well_id)
+
+    # Create validators if config provided
+    if validation_config is not None:
+        input_validator = InputValidator(
+            max_oil_rate=validation_config.max_oil_rate,
+            max_gas_rate=validation_config.max_gas_rate,
+            max_water_rate=validation_config.max_water_rate,
+        )
+        quality_validator = DataQualityValidator(
+            gap_threshold_months=validation_config.gap_threshold_months,
+            outlier_sigma=validation_config.outlier_sigma,
+            shutin_threshold=validation_config.shutin_threshold,
+            min_cv=validation_config.min_cv,
+        )
+        # Fitting validator uses product-specific b bounds
+        fitting_validators = {}
+        for product in products:
+            config = product_configs.get(product, FittingConfig())
+            fitting_validators[product] = FittingValidator(
+                min_points=config.min_points,
+                min_r_squared=validation_config.min_r_squared,
+                b_min=config.b_min,
+                b_max=config.b_max,
+                max_annual_decline=validation_config.max_annual_decline,
+            )
+
+        # Run input validation
+        validation_result = validation_result.merge(input_validator.validate(well))
+    else:
+        input_validator = None
+        quality_validator = None
+        fitting_validators = {}
 
     for product in products:
         try:
@@ -111,15 +186,35 @@ def _fit_single_well(
             if q.max() < 1.0:
                 continue
 
+            # Run data quality validation
+            if quality_validator is not None:
+                validation_result = validation_result.merge(
+                    quality_validator.validate(well, product)
+                )
+
+            # Run pre-fit validation
+            if product in fitting_validators:
+                validation_result = validation_result.merge(
+                    fitting_validators[product].validate_pre_fit(well, product)
+                )
+
             result = fitter.fit(t, q)
             well.set_forecast(product, result)
+
+            # Run post-fit validation
+            if product in fitting_validators:
+                validation_result = validation_result.merge(
+                    fitting_validators[product].validate_fit_result(
+                        result, well.well_id, product
+                    )
+                )
 
         except ValueError as e:
             errors.append(f"{product}: {str(e)}")
         except Exception as e:
             errors.append(f"{product}: Unexpected error - {str(e)}")
 
-    return well, errors
+    return well, errors, validation_result
 
 
 class BatchProcessor:
@@ -207,10 +302,16 @@ class BatchProcessor:
             for product in self.config.products
         }
 
+        # Get validation config if available
+        validation_config = None
+        if self.config.pyforecast_config is not None:
+            validation_config = self.config.pyforecast_config.validation
+
         successful = 0
         failed = 0
         all_errors = []
         processed_wells = []
+        all_validation_results = {}
 
         # Process in parallel
         workers = self.config.workers
@@ -224,7 +325,8 @@ class BatchProcessor:
                     _fit_single_well,
                     well,
                     self.config.products,
-                    product_configs
+                    product_configs,
+                    validation_config,
                 ): well.well_id
                 for well in filtered_wells
             }
@@ -240,8 +342,9 @@ class BatchProcessor:
             for future in iterator:
                 well_id = futures[future]
                 try:
-                    well, errors = future.result()
+                    well, errors, validation_result = future.result()
                     processed_wells.append(well)
+                    all_validation_results[well_id] = validation_result
 
                     if errors:
                         all_errors.extend((well_id, e) for e in errors)
@@ -266,7 +369,8 @@ class BatchProcessor:
             successful=successful,
             failed=failed,
             skipped=skipped,
-            errors=all_errors
+            errors=all_errors,
+            validation_results=all_validation_results,
         )
 
     def run(
@@ -365,3 +469,50 @@ class BatchProcessor:
                 for well_id, error in result.errors:
                     f.write(f"{well_id}: {error}\n")
             logger.info(f"Saved error log to {error_path}")
+
+        # Save validation report
+        if result.validation_results:
+            self._save_validation_report(result, output_dir)
+
+    def _save_validation_report(
+        self,
+        result: BatchResult,
+        output_dir: Path,
+    ) -> None:
+        """Save validation report to file.
+
+        Args:
+            result: Batch processing result
+            output_dir: Output directory
+        """
+        report_path = output_dir / "validation_report.txt"
+        summary = result.get_validation_summary()
+
+        with open(report_path, "w") as f:
+            f.write("PyForecast Validation Report\n")
+            f.write("=" * 40 + "\n\n")
+
+            f.write("Summary:\n")
+            f.write(f"  Wells with errors: {summary['wells_with_errors']}\n")
+            f.write(f"  Wells with warnings: {summary['wells_with_warnings']}\n")
+            f.write(f"  Total errors: {summary['total_errors']}\n")
+            f.write(f"  Total warnings: {summary['total_warnings']}\n\n")
+
+            if summary["by_category"]:
+                f.write("Issues by category:\n")
+                for cat, count in sorted(summary["by_category"].items()):
+                    f.write(f"  {cat}: {count}\n")
+                f.write("\n")
+
+            # Write detailed issues per well
+            f.write("Detailed Issues:\n")
+            f.write("-" * 40 + "\n")
+
+            for well_id, val_result in sorted(result.validation_results.items()):
+                if val_result.issues:
+                    f.write(f"\n{well_id}:\n")
+                    for issue in val_result.issues:
+                        f.write(f"  [{issue.code}] {issue.severity.name}: {issue.message}\n")
+                        f.write(f"    Guidance: {issue.guidance}\n")
+
+        logger.info(f"Saved validation report to {report_path}")

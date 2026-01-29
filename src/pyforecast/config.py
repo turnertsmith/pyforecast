@@ -68,6 +68,34 @@ class OutputConfig:
 
 
 @dataclass
+class ValidationConfig:
+    """Validation configuration.
+
+    Attributes:
+        max_oil_rate: Maximum expected oil rate (bbl/mo) - IV002 threshold
+        max_gas_rate: Maximum expected gas rate (mcf/mo) - IV002 threshold
+        max_water_rate: Maximum expected water rate (bbl/mo) - IV002 threshold
+        gap_threshold_months: Minimum gap size to flag (months) - DQ001
+        outlier_sigma: Number of std devs for outlier detection - DQ002
+        shutin_threshold: Rate below which is considered shut-in - DQ003
+        min_cv: Minimum coefficient of variation - DQ004
+        min_r_squared: Minimum acceptable R² value - FR001
+        max_annual_decline: Maximum acceptable annual decline rate - FR005
+        strict_mode: If True, treat warnings as errors
+    """
+    max_oil_rate: float = 50000.0
+    max_gas_rate: float = 500000.0
+    max_water_rate: float = 100000.0
+    gap_threshold_months: int = 2
+    outlier_sigma: float = 3.0
+    shutin_threshold: float = 1.0
+    min_cv: float = 0.05
+    min_r_squared: float = 0.5
+    max_annual_decline: float = 1.0
+    strict_mode: bool = False
+
+
+@dataclass
 class PyForecastConfig:
     """Complete PyForecast configuration.
 
@@ -78,6 +106,7 @@ class PyForecastConfig:
         regime: Regime detection parameters
         fitting: General fitting parameters
         output: Output configuration
+        validation: Validation configuration
     """
     oil: ProductConfig = field(default_factory=ProductConfig)
     gas: ProductConfig = field(default_factory=ProductConfig)
@@ -85,6 +114,7 @@ class PyForecastConfig:
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     fitting: FittingDefaults = field(default_factory=FittingDefaults)
     output: OutputConfig = field(default_factory=OutputConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
     def get_product_config(self, product: Literal["oil", "gas", "water"]) -> ProductConfig:
         """Get configuration for a specific product."""
@@ -149,6 +179,10 @@ class PyForecastConfig:
                 output_data["products"] = list(output_data["products"])
             config.output = OutputConfig(**output_data)
 
+        # Validation config
+        if "validation" in data:
+            config.validation = ValidationConfig(**data["validation"])
+
         return config
 
     def to_dict(self) -> dict:
@@ -183,6 +217,18 @@ class PyForecastConfig:
                 "plots": self.output.plots,
                 "batch_plot": self.output.batch_plot,
                 "format": self.output.format,
+            },
+            "validation": {
+                "max_oil_rate": self.validation.max_oil_rate,
+                "max_gas_rate": self.validation.max_gas_rate,
+                "max_water_rate": self.validation.max_water_rate,
+                "gap_threshold_months": self.validation.gap_threshold_months,
+                "outlier_sigma": self.validation.outlier_sigma,
+                "shutin_threshold": self.validation.shutin_threshold,
+                "min_cv": self.validation.min_cv,
+                "min_r_squared": self.validation.min_r_squared,
+                "max_annual_decline": self.validation.max_annual_decline,
+                "strict_mode": self.validation.strict_mode,
             },
         }
 
@@ -248,6 +294,19 @@ output:
   plots: true             # Generate individual well plots
   batch_plot: true        # Generate multi-well overlay plot
   format: ac_economic     # Export format: ac_forecast or ac_economic
+
+# Data validation settings
+validation:
+  max_oil_rate: 50000     # Max expected oil rate (bbl/mo) - IV002
+  max_gas_rate: 500000    # Max expected gas rate (mcf/mo) - IV002
+  max_water_rate: 100000  # Max expected water rate (bbl/mo) - IV002
+  gap_threshold_months: 2 # Min gap size to flag - DQ001
+  outlier_sigma: 3.0      # Std devs for outlier detection - DQ002
+  shutin_threshold: 1.0   # Rate below = shut-in - DQ003
+  min_cv: 0.05            # Min coefficient of variation - DQ004
+  min_r_squared: 0.5      # Min acceptable R² - FR001
+  max_annual_decline: 1.0 # Max annual decline rate - FR005
+  strict_mode: false      # Treat warnings as errors
 """
 
     with open(filepath, "w") as f:

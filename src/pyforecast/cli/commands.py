@@ -145,6 +145,23 @@ def process(
     if result.errors:
         typer.echo(f"\n{len(result.errors)} error(s) occurred. See {output}/errors.txt")
 
+    # Report validation summary
+    if result.validation_results:
+        summary = result.get_validation_summary()
+        typer.echo("")
+        typer.echo("Validation Summary:")
+        typer.echo(f"  Wells with errors: {summary['wells_with_errors']}")
+        typer.echo(f"  Wells with warnings: {summary['wells_with_warnings']}")
+
+        if summary["by_category"]:
+            typer.echo("")
+            typer.echo("  Issues by category:")
+            for cat, count in sorted(summary["by_category"].items()):
+                typer.echo(f"    {cat}: {count}")
+
+        if summary['wells_with_errors'] > 0 or summary['wells_with_warnings'] > 0:
+            typer.echo(f"\n  See {output}/validation_report.txt for details")
+
     typer.echo(f"\nOutput saved to: {output}/")
 
 
