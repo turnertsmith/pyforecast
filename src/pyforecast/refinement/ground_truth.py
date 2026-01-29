@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from ..data.well import Well
     from ..import_.aries_forecast import AriesForecastImporter
 
+from ..import_.aries_forecast import normalize_well_id
+
 
 @dataclass
 class GroundTruthConfig:

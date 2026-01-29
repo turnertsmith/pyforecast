@@ -216,23 +216,30 @@ def process(
 
         typer.echo(f"  Logged {fit_logger.storage.count()} fits to storage")
 
-    # Run ground truth comparison if requested
+    # Run ground truth comparison if requested (CLI flag or config)
     gt_results = []
-    if ground_truth and result.wells:
+    gt_file = ground_truth or (
+        Path(pf_config.refinement.ground_truth_file)
+        if pf_config.refinement.ground_truth_file
+        else None
+    )
+    gt_comparison_months = gt_months if ground_truth else pf_config.refinement.ground_truth_months
+
+    if gt_file and result.wells:
         from ..import_.aries_forecast import AriesForecastImporter
         from ..refinement.ground_truth import GroundTruthValidator, GroundTruthConfig
 
         typer.echo("Running ground truth comparison...")
         aries_importer = AriesForecastImporter()
         try:
-            count = aries_importer.load(ground_truth)
-            typer.echo(f"  Loaded {count} ARIES forecasts")
+            count = aries_importer.load(gt_file)
+            typer.echo(f"  Loaded {count} ARIES forecasts from {gt_file}")
         except Exception as e:
             typer.echo(f"  Error loading ARIES file: {e}", err=True)
             aries_importer = None
 
         if aries_importer:
-            gt_config = GroundTruthConfig(comparison_months=gt_months)
+            gt_config = GroundTruthConfig(comparison_months=gt_comparison_months)
             gt_validator = GroundTruthValidator(aries_importer, gt_config)
 
             for well in result.wells:
@@ -303,9 +310,11 @@ def process(
         typer.echo(f"  Average correlation: {gt_summary['avg_correlation']:.3f}")
         typer.echo(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%")
 
-        # Save ground truth report
+        # Save ground truth report and CSV
         _save_ground_truth_report(gt_results, gt_summary, output)
+        _save_ground_truth_csv(gt_results, output)
         typer.echo(f"\n  See {output}/ground_truth_report.txt for details")
+        typer.echo(f"  CSV export: {output}/ground_truth_results.csv")
 
     typer.echo(f"\nOutput saved to: {output}/")
 
@@ -1012,6 +1021,68 @@ def calibrate_regime(
                 "results": results,
             }, f, indent=2)
         typer.echo(f"\nCalibration results saved to: {output}")
+
+
+def _save_ground_truth_csv(
+    results: list,
+    output_dir: Path,
+) -> None:
+    """Save ground truth comparison results to CSV file.
+
+    Args:
+        results: List of GroundTruthResult objects
+        output_dir: Output directory
+    """
+    import csv
+
+    csv_path = output_dir / "ground_truth_results.csv"
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "well_id",
+            "product",
+            "match_grade",
+            "is_good_match",
+            "mape",
+            "correlation",
+            "bias",
+            "cumulative_diff_pct",
+            "aries_qi",
+            "aries_di_annual",
+            "aries_b",
+            "aries_decline_type",
+            "pyf_qi",
+            "pyf_di_annual",
+            "pyf_b",
+            "qi_pct_diff",
+            "di_pct_diff",
+            "b_abs_diff",
+            "comparison_months",
+        ])
+
+        for r in results:
+            writer.writerow([
+                r.well_id,
+                r.product,
+                r.match_grade,
+                r.is_good_match,
+                round(r.mape, 2),
+                round(r.correlation, 4),
+                round(r.bias, 4),
+                round(r.cumulative_diff_pct, 2),
+                round(r.aries_qi, 2),
+                round(r.aries_di * 12, 4),  # Convert to annual
+                round(r.aries_b, 3),
+                r.aries_decline_type,
+                round(r.pyf_qi, 2),
+                round(r.pyf_di * 12, 4),  # Convert to annual
+                round(r.pyf_b, 3),
+                round(r.qi_pct_diff, 2),
+                round(r.di_pct_diff, 2),
+                round(r.b_abs_diff, 3),
+                r.comparison_months,
+            ])
 
 
 def _save_ground_truth_report(

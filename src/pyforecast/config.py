@@ -87,6 +87,8 @@ class RefinementConfig:
         min_data_points_for_logging: Minimum data points required to log a fit
         max_coefficient_of_variation: Maximum CV to accept fit for logging (0 = no limit)
         min_r_squared_for_logging: Minimum R-squared to accept fit for logging (0 = no limit)
+        ground_truth_file: ARIES AC_ECONOMIC CSV file for ground truth comparison
+        ground_truth_months: Number of months to compare forecasts (default 60)
     """
 
     # Logging settings
@@ -112,6 +114,10 @@ class RefinementConfig:
     min_data_points_for_logging: int = 6
     max_coefficient_of_variation: float = 0.0  # 0 = no limit
     min_r_squared_for_logging: float = 0.0  # 0 = no limit
+
+    # Ground truth comparison
+    ground_truth_file: str | None = None  # ARIES AC_ECONOMIC CSV
+    ground_truth_months: int = 60  # Months to compare
 
 
 @dataclass
@@ -349,6 +355,8 @@ class PyForecastConfig:
                 "min_data_points_for_logging": self.refinement.min_data_points_for_logging,
                 "max_coefficient_of_variation": self.refinement.max_coefficient_of_variation,
                 "min_r_squared_for_logging": self.refinement.min_r_squared_for_logging,
+                "ground_truth_file": self.refinement.ground_truth_file,
+                "ground_truth_months": self.refinement.ground_truth_months,
             },
         }
 
@@ -442,6 +450,8 @@ refinement:
   min_data_points_for_logging: 6  # Min data points to log fit
   max_coefficient_of_variation: 0 # Max CV for logging (0 = no limit)
   min_r_squared_for_logging: 0    # Min R² for logging (0 = no limit)
+  ground_truth_file: null         # ARIES AC_ECONOMIC CSV for comparison
+  ground_truth_months: 60         # Months to compare forecasts
 """
 
     with open(filepath, "w") as f:

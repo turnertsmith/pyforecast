@@ -29,6 +29,49 @@ from ..core.models import HyperbolicModel
 DAYS_PER_MONTH = 30.4375
 
 
+def normalize_well_id(well_id: str) -> str:
+    """Normalize a well ID for consistent matching.
+
+    For API numbers (XX-XXX-XXXXX format or 10+ digits with separators):
+    - Remove dashes, spaces, and other separators
+    - Result is a 10-14 digit string
+
+    For PROPNUMs (non-API identifiers):
+    - Just strip whitespace, preserve as-is
+
+    Examples:
+        "42-123-45678" -> "4212345678"  (API normalized)
+        "42 123 45678" -> "4212345678"  (API normalized)
+        "WELL001" -> "WELL001"          (PROPNUM unchanged)
+        "Smith_Ranch_1" -> "Smith_Ranch_1"  (PROPNUM unchanged)
+
+    Args:
+        well_id: Raw well identifier
+
+    Returns:
+        Normalized well identifier
+    """
+    if not well_id:
+        return ""
+
+    stripped = well_id.strip()
+
+    # Check if this looks like an API number
+    # API format: XX-XXX-XXXXX (state-county-well) with optional suffixes
+    # When separators removed, should be 10-14 digits
+    digits_only = re.sub(r"[^0-9]", "", stripped)
+
+    # If it's 10-14 digits and the original had separators typical of APIs,
+    # treat it as an API and return just the digits
+    if 10 <= len(digits_only) <= 14:
+        # Check if original format looks like API (has dashes or spaces between digit groups)
+        if re.match(r"^\d{2}[-\s]?\d{3}[-\s]?\d{5}", stripped):
+            return digits_only
+
+    # Otherwise return as-is (PROPNUM)
+    return stripped
+
+
 @dataclass
 class AriesForecastParams:
     """ARIES forecast parameters converted to internal units.
@@ -215,7 +258,9 @@ class AriesForecastImporter:
             decline_type=params.decline_type,
         )
 
-        key = (propnum, expected_product)
+        # Store with normalized ID for consistent lookup
+        normalized_id = normalize_well_id(propnum)
+        key = (normalized_id, expected_product)
         self._forecasts[key] = params
         return 1
 
@@ -225,13 +270,14 @@ class AriesForecastImporter:
         Returns number of forecasts parsed.
         """
         count = 0
+        normalized_id = normalize_well_id(propnum)
         for col, value in row.items():
             if not value or not value.strip():
                 continue
 
             params = self._parse_expression(propnum, value.strip())
             if params:
-                key = (propnum, params.product)
+                key = (normalized_id, params.product)
                 self._forecasts[key] = params
                 count += 1
         return count
@@ -328,14 +374,18 @@ class AriesForecastImporter:
     ) -> AriesForecastParams | None:
         """Get forecast parameters for a well/product.
 
+        The propnum is normalized before lookup to handle API format variations
+        (e.g., "42-123-45678" matches "4212345678").
+
         Args:
-            propnum: Well property number
+            propnum: Well property number or API
             product: Product type (oil, gas, water)
 
         Returns:
             AriesForecastParams if found, None otherwise
         """
-        return self._forecasts.get((propnum, product))
+        normalized_id = normalize_well_id(propnum)
+        return self._forecasts.get((normalized_id, product))
 
     def to_model(self, params: AriesForecastParams) -> HyperbolicModel:
         """Convert ARIES parameters to HyperbolicModel.
@@ -354,13 +404,14 @@ class AriesForecastImporter:
         )
 
     def list_wells(self) -> list[str]:
-        """List all unique well IDs loaded."""
+        """List all unique well IDs loaded (normalized form)."""
         return sorted(set(propnum for propnum, _ in self._forecasts.keys()))
 
     def list_products(self, propnum: str) -> list[str]:
         """List products available for a well."""
+        normalized_id = normalize_well_id(propnum)
         return sorted(
-            product for p, product in self._forecasts.keys() if p == propnum
+            product for p, product in self._forecasts.keys() if p == normalized_id
         )
 
     def __len__(self) -> int:
@@ -368,5 +419,10 @@ class AriesForecastImporter:
         return len(self._forecasts)
 
     def __contains__(self, key: tuple[str, str]) -> bool:
-        """Check if forecast exists for (propnum, product)."""
-        return key in self._forecasts
+        """Check if forecast exists for (propnum, product).
+
+        The propnum is normalized before lookup.
+        """
+        propnum, product = key
+        normalized_id = normalize_well_id(propnum)
+        return (normalized_id, product) in self._forecasts

@@ -11,7 +11,47 @@ from pyforecast.import_.aries_forecast import (
     AriesForecastParams,
     AriesForecastImporter,
     DAYS_PER_MONTH,
+    normalize_well_id,
 )
+
+
+class TestNormalizeWellId:
+    """Tests for normalize_well_id function."""
+
+    def test_api_with_dashes(self):
+        """Test API number with dashes is normalized."""
+        assert normalize_well_id("42-123-45678") == "4212345678"
+
+    def test_api_with_spaces(self):
+        """Test API number with spaces is normalized."""
+        assert normalize_well_id("42 123 45678") == "4212345678"
+
+    def test_api_no_separators(self):
+        """Test API number without separators stays the same."""
+        assert normalize_well_id("4212345678") == "4212345678"
+
+    def test_propnum_unchanged(self):
+        """Test PROPNUM strings are left unchanged."""
+        assert normalize_well_id("WELL001") == "WELL001"
+        assert normalize_well_id("Smith_Ranch_1") == "Smith_Ranch_1"
+
+    def test_whitespace_stripped(self):
+        """Test leading/trailing whitespace is stripped."""
+        assert normalize_well_id("  WELL001  ") == "WELL001"
+        assert normalize_well_id("  42-123-45678  ") == "4212345678"
+
+    def test_empty_string(self):
+        """Test empty string returns empty."""
+        assert normalize_well_id("") == ""
+
+    def test_api_14_digit(self):
+        """Test 14-digit API (with suffixes) is normalized."""
+        assert normalize_well_id("42-123-45678-0000") == "42123456780000"
+
+    def test_short_number_not_api(self):
+        """Test short numeric strings are not treated as API."""
+        # Less than 10 digits - not an API, leave as-is
+        assert normalize_well_id("12345") == "12345"
 
 
 class TestAriesForecastParams:
@@ -383,10 +423,10 @@ class TestAriesForecastImporter:
             assert params.b == 0.75
             assert params.decline_type == "HYP"
 
-            # Verify wells list
+            # Verify wells list (returns normalized IDs)
             wells = importer.list_wells()
-            assert '42-001-00001' in wells
-            assert '42-001-00002' in wells
+            assert '4200100001' in wells  # Normalized from 42-001-00001
+            assert '4200100002' in wells  # Normalized from 42-001-00002
         finally:
             filepath.unlink()
 
@@ -413,5 +453,35 @@ class TestAriesForecastImporter:
 
             # Should NOT be oil
             assert importer.get('well-1', 'oil') is None
+        finally:
+            filepath.unlink()
+
+    def test_api_normalization_matching(self):
+        """Test that API numbers match regardless of dash format."""
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.csv', delete=False, newline=''
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(['PROPNUM', 'KEYWORD', 'EXPRESSION'])
+            # Store with dashes
+            writer.writerow(['42-123-45678', 'OIL', '1000 X B/D 6 EXP B/0.50 8.5'])
+            filepath = Path(f.name)
+
+        try:
+            importer = AriesForecastImporter()
+            importer.load(filepath)
+
+            # Should find with dashes
+            assert importer.get('42-123-45678', 'oil') is not None
+
+            # Should also find without dashes
+            assert importer.get('4212345678', 'oil') is not None
+
+            # Should also find with spaces
+            assert importer.get('42 123 45678', 'oil') is not None
+
+            # __contains__ should also work
+            assert ('42-123-45678', 'oil') in importer
+            assert ('4212345678', 'oil') in importer
         finally:
             filepath.unlink()
