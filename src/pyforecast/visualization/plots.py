@@ -115,13 +115,14 @@ class DeclinePlotter:
                 )
             ))
 
-            # Forecast projection
+            # Forecast projection (continue from end of historical data)
             t_last = t[-1]
-            t_forecast = np.linspace(0, self.forecast_months, 200)
+            t_model_end = t_last - t[result.regime_start_idx]  # End time in model coordinates
+            t_forecast = np.linspace(t_model_end, t_model_end + self.forecast_months, 200)
             q_forecast = model.rate(t_forecast)
 
             fig.add_trace(go.Scatter(
-                x=t_forecast + t_last,
+                x=t_forecast - t_model_end + t_last,  # Shift to plot coordinates
                 y=q_forecast,
                 mode='lines',
                 name='Forecast',
@@ -221,14 +222,15 @@ class DeclinePlotter:
             # Forecast
             if result is not None:
                 t_last = t[-1] if len(t) > 0 else 0
-                t_forecast = np.linspace(0, self.forecast_months, 100)
+                t_model_end = t_last - t[result.regime_start_idx] if len(t) > 0 else 0
+                t_forecast = np.linspace(t_model_end, t_model_end + self.forecast_months, 100)
                 q_forecast = result.model.rate(t_forecast)
 
                 if normalize and result.model.qi > 0:
                     q_forecast = q_forecast / result.model.qi
 
                 fig.add_trace(go.Scatter(
-                    x=t_forecast + t_last,
+                    x=t_forecast - t_model_end + t_last,
                     y=q_forecast,
                     mode='lines',
                     name=f'{well.well_id} (forecast)',
