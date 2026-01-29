@@ -59,12 +59,12 @@ class OutputConfig:
         products: Products to forecast (default: oil, gas)
         plots: Generate individual well plots (default: True)
         batch_plot: Generate batch overlay plot (default: True)
-        format: Export format - 'ac_forecast' or 'ac_economic' (default: ac_economic)
+        format: Export format - 'ac_forecast', 'ac_economic', or 'json' (default: ac_economic)
     """
     products: list[Literal["oil", "gas", "water"]] = field(default_factory=lambda: ["oil", "gas", "water"])
     plots: bool = True
     batch_plot: bool = True
-    format: Literal["ac_forecast", "ac_economic"] = "ac_economic"
+    format: Literal["ac_forecast", "ac_economic", "json"] = "ac_economic"
 
 
 @dataclass
@@ -127,6 +127,54 @@ class PyForecastConfig:
         else:
             raise ValueError(f"Unknown product: {product}")
 
+    def validate(self) -> None:
+        """Validate configuration values.
+
+        Raises:
+            ValueError: If any configuration value is invalid
+        """
+        errors = []
+
+        # Validate product configs
+        for product_name in ("oil", "gas", "water"):
+            product_config = self.get_product_config(product_name)
+            if product_config.b_min >= product_config.b_max:
+                errors.append(
+                    f"{product_name}: b_min ({product_config.b_min}) must be less than "
+                    f"b_max ({product_config.b_max})"
+                )
+            if product_config.dmin <= 0:
+                errors.append(
+                    f"{product_name}: dmin ({product_config.dmin}) must be greater than 0"
+                )
+
+        # Validate fitting defaults
+        if self.fitting.min_points < 3:
+            errors.append(
+                f"fitting.min_points ({self.fitting.min_points}) must be at least 3"
+            )
+        if self.fitting.recency_half_life <= 0:
+            errors.append(
+                f"fitting.recency_half_life ({self.fitting.recency_half_life}) must be greater than 0"
+            )
+
+        # Validate regime config
+        if self.regime.threshold <= 0:
+            errors.append(
+                f"regime.threshold ({self.regime.threshold}) must be greater than 0"
+            )
+        if self.regime.window < 2:
+            errors.append(
+                f"regime.window ({self.regime.window}) must be at least 2"
+            )
+        if self.regime.sustained_months < 1:
+            errors.append(
+                f"regime.sustained_months ({self.regime.sustained_months}) must be at least 1"
+            )
+
+        if errors:
+            raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
+
     @classmethod
     def from_yaml(cls, filepath: Path | str) -> "PyForecastConfig":
         """Load configuration from YAML file.
@@ -136,12 +184,17 @@ class PyForecastConfig:
 
         Returns:
             PyForecastConfig instance
+
+        Raises:
+            ValueError: If configuration values are invalid
         """
         filepath = Path(filepath)
         with open(filepath) as f:
             data = yaml.safe_load(f) or {}
 
-        return cls.from_dict(data)
+        config = cls.from_dict(data)
+        config.validate()
+        return config
 
     @classmethod
     def from_dict(cls, data: dict) -> "PyForecastConfig":

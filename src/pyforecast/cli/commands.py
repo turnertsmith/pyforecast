@@ -70,7 +70,7 @@ def process(
         Optional[str],
         typer.Option(
             "--format",
-            help="Export format: ac_forecast or ac_economic (overrides config)",
+            help="Export format: ac_forecast, ac_economic, or json (overrides config)",
         )
     ] = None,
 ) -> None:
@@ -111,8 +111,8 @@ def process(
     if no_batch_plot:
         pf_config.output.batch_plot = False
     if export_format:
-        if export_format not in ("ac_forecast", "ac_economic"):
-            typer.echo(f"Error: Invalid format '{export_format}'.", err=True)
+        if export_format not in ("ac_forecast", "ac_economic", "json"):
+            typer.echo(f"Error: Invalid format '{export_format}'. Must be ac_forecast, ac_economic, or json.", err=True)
             raise typer.Exit(1)
         pf_config.output.format = export_format  # type: ignore
 
@@ -320,6 +320,152 @@ def init(
     typer.echo(f"Config file created: {output}")
     typer.echo("\nEdit this file to customize settings, then use:")
     typer.echo(f"  pyforecast process data.csv --config {output}")
+
+
+@app.command()
+def validate(
+    input_files: Annotated[
+        list[Path],
+        typer.Argument(
+            help="Input CSV/Excel file(s) with production data",
+            exists=True,
+        )
+    ],
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-c", "--config",
+            help="YAML config file with validation settings",
+            exists=True,
+        )
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-o", "--output",
+            help="Output file for detailed validation report",
+        )
+    ] = None,
+) -> None:
+    """Validate production data without running forecasts.
+
+    Loads wells from input files and runs input validation and data quality
+    checks. Prints a summary to console and optionally writes a detailed
+    report to file.
+
+    Exit codes:
+        0: No errors found (warnings may be present)
+        1: Validation errors found
+
+    Example:
+        pyforecast validate data.csv --output report.txt
+    """
+    from ..data.base import load_wells
+    from ..validation import (
+        InputValidator,
+        DataQualityValidator,
+        ValidationResult,
+        merge_results,
+    )
+
+    # Load config
+    if config:
+        typer.echo(f"Loading config from {config}")
+        pf_config = PyForecastConfig.from_yaml(config)
+    else:
+        pf_config = PyForecastConfig()
+
+    # Create validators from config
+    input_validator = InputValidator(
+        max_oil_rate=pf_config.validation.max_oil_rate,
+        max_gas_rate=pf_config.validation.max_gas_rate,
+        max_water_rate=pf_config.validation.max_water_rate,
+    )
+    quality_validator = DataQualityValidator(
+        gap_threshold_months=pf_config.validation.gap_threshold_months,
+        outlier_sigma=pf_config.validation.outlier_sigma,
+        shutin_threshold=pf_config.validation.shutin_threshold,
+        min_cv=pf_config.validation.min_cv,
+    )
+
+    # Load and validate all wells
+    all_results: list[ValidationResult] = []
+    total_wells = 0
+
+    for input_file in input_files:
+        typer.echo(f"Loading {input_file}...")
+        try:
+            wells = load_wells(input_file)
+        except Exception as e:
+            typer.echo(f"  Error loading file: {e}", err=True)
+            continue
+
+        typer.echo(f"  Found {len(wells)} wells")
+        total_wells += len(wells)
+
+        for well in wells:
+            # Run input validation
+            result = input_validator.validate(well)
+
+            # Run data quality checks for each product
+            for product in pf_config.output.products:
+                try:
+                    quality_result = quality_validator.validate(well, product)
+                    result = result.merge(quality_result)
+                except Exception:
+                    pass  # Product may not be available
+
+            all_results.append(result)
+
+    # Summarize results
+    total_errors = sum(r.error_count for r in all_results)
+    total_warnings = sum(r.warning_count for r in all_results)
+    wells_with_errors = sum(1 for r in all_results if r.has_errors)
+    wells_with_warnings = sum(1 for r in all_results if r.has_warnings)
+
+    typer.echo("")
+    typer.echo("Validation Summary:")
+    typer.echo(f"  Total wells: {total_wells}")
+    typer.echo(f"  Wells with errors: {wells_with_errors}")
+    typer.echo(f"  Wells with warnings: {wells_with_warnings}")
+    typer.echo(f"  Total errors: {total_errors}")
+    typer.echo(f"  Total warnings: {total_warnings}")
+
+    # Count issues by code
+    issue_counts: dict[str, int] = {}
+    for result in all_results:
+        for issue in result.issues:
+            issue_counts[issue.code] = issue_counts.get(issue.code, 0) + 1
+
+    if issue_counts:
+        typer.echo("")
+        typer.echo("Issues by code:")
+        for code, count in sorted(issue_counts.items()):
+            typer.echo(f"  {code}: {count}")
+
+    # Write detailed report if requested
+    if output:
+        with open(output, "w") as f:
+            f.write("PyForecast Validation Report\n")
+            f.write("=" * 40 + "\n\n")
+            f.write(f"Files: {[str(p) for p in input_files]}\n")
+            f.write(f"Total wells: {total_wells}\n")
+            f.write(f"Total errors: {total_errors}\n")
+            f.write(f"Total warnings: {total_warnings}\n\n")
+
+            for result in all_results:
+                if result.issues:
+                    f.write(f"\n{result.well_id}\n")
+                    f.write("-" * 30 + "\n")
+                    for issue in result.issues:
+                        f.write(f"  [{issue.code}] {issue.severity.name}: {issue.message}\n")
+                        f.write(f"    Guidance: {issue.guidance}\n")
+
+        typer.echo(f"\nDetailed report written to: {output}")
+
+    # Exit with error code if errors found
+    if total_errors > 0:
+        raise typer.Exit(1)
 
 
 @app.command()

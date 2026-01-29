@@ -14,6 +14,7 @@ from ..core.fitting import DeclineFitter, FittingConfig
 from ..core.models import ForecastResult
 from ..export.aries_export import AriesExporter
 from ..export.aries_ac_economic import AriesAcEconomicExporter
+from ..export.json_export import JsonExporter
 from ..visualization.plots import DeclinePlotter
 from ..validation import (
     ValidationResult,
@@ -43,7 +44,7 @@ class BatchConfig:
         output_dir: Output directory for results
         save_plots: Whether to save individual well plots
         save_batch_plot: Whether to save multi-well overlay plot
-        export_format: Export format (ac_forecast or ac_economic)
+        export_format: Export format (ac_forecast, ac_economic, or json)
     """
     products: list[Literal["oil", "gas", "water"]]
     min_points: int = 6
@@ -53,7 +54,7 @@ class BatchConfig:
     output_dir: Path | None = None
     save_plots: bool = True
     save_batch_plot: bool = True
-    export_format: Literal["ac_forecast", "ac_economic"] = "ac_economic"
+    export_format: Literal["ac_forecast", "ac_economic", "json"] = "ac_economic"
 
     def get_fitting_config(self, product: str) -> FittingConfig:
         """Get fitting config for a specific product.
@@ -418,14 +419,26 @@ class BatchProcessor:
             output_dir: Output directory
         """
         # Export forecasts based on format
-        if self.config.export_format == "ac_economic":
+        if self.config.export_format == "json":
+            exporter = JsonExporter(
+                config=self.config.pyforecast_config,
+            )
+            forecast_path = output_dir / "forecasts.json"
+            exporter.save(
+                result.wells,
+                forecast_path,
+                self.config.products,
+                result.validation_results,
+            )
+        elif self.config.export_format == "ac_economic":
             exporter = AriesAcEconomicExporter()
             forecast_path = output_dir / "ac_economic.csv"
+            exporter.save(result.wells, forecast_path, self.config.products)
         else:
             exporter = AriesExporter()
             forecast_path = output_dir / "forecasts.csv"
+            exporter.save(result.wells, forecast_path, self.config.products)
 
-        exporter.save(result.wells, forecast_path, self.config.products)
         logger.info(f"Saved forecast to {forecast_path}")
 
         # Save plots
