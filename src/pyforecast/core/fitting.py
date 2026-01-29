@@ -44,6 +44,33 @@ class FittingConfig:
         """Convert annual Dmin to monthly."""
         return self.dmin_annual / 12.0
 
+    @classmethod
+    def from_pyforecast_config(
+        cls,
+        config: "PyForecastConfig",  # noqa: F821
+        product: str,
+    ) -> "FittingConfig":
+        """Create FittingConfig from PyForecastConfig for a specific product.
+
+        Args:
+            config: PyForecastConfig instance
+            product: Product name (oil, gas, water)
+
+        Returns:
+            FittingConfig for the specified product
+        """
+        product_config = config.get_product_config(product)
+        return cls(
+            b_min=product_config.b_min,
+            b_max=product_config.b_max,
+            dmin_annual=product_config.dmin,
+            regime_threshold=config.regime.threshold,
+            regime_window=config.regime.window,
+            regime_sustained_months=config.regime.sustained_months,
+            recency_half_life=config.fitting.recency_half_life,
+            min_points=config.fitting.min_points,
+        )
+
 
 class DeclineFitter:
     """Fits hyperbolic decline curves to production data."""

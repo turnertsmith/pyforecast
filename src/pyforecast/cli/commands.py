@@ -5,8 +5,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from ..core.fitting import FittingConfig
-from ..batch.processor import BatchProcessor, BatchConfig
+from ..config import PyForecastConfig, generate_default_config
 
 app = typer.Typer(
     name="pyforecast",
@@ -31,20 +30,21 @@ def process(
             help="Output directory for forecasts and plots",
         )
     ] = Path("output"),
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-c", "--config",
+            help="YAML config file (use 'pyforecast init' to generate template)",
+            exists=True,
+        )
+    ] = None,
     product: Annotated[
-        list[str],
+        Optional[list[str]],
         typer.Option(
             "-p", "--product",
-            help="Product(s) to forecast: oil, gas, or both",
+            help="Product(s) to forecast: oil, gas, water (overrides config)",
         )
-    ] = ["oil", "gas"],
-    min_points: Annotated[
-        int,
-        typer.Option(
-            "--min-points",
-            help="Minimum months of production data required",
-        )
-    ] = 6,
+    ] = None,
     workers: Annotated[
         Optional[int],
         typer.Option(
@@ -52,41 +52,6 @@ def process(
             help="Number of parallel workers (default: auto)",
         )
     ] = None,
-    b_min: Annotated[
-        float,
-        typer.Option(
-            "--b-min",
-            help="Minimum b-factor for hyperbolic decline",
-        )
-    ] = 0.01,
-    b_max: Annotated[
-        float,
-        typer.Option(
-            "--b-max",
-            help="Maximum b-factor for hyperbolic decline",
-        )
-    ] = 1.5,
-    dmin: Annotated[
-        float,
-        typer.Option(
-            "--dmin",
-            help="Terminal decline rate (annual fraction, e.g., 0.06 = 6%)",
-        )
-    ] = 0.06,
-    regime_threshold: Annotated[
-        float,
-        typer.Option(
-            "--regime-threshold",
-            help="Threshold for regime change detection (fraction, e.g., 1.0 = 100%)",
-        )
-    ] = 1.0,
-    recency_half_life: Annotated[
-        float,
-        typer.Option(
-            "--recency-half-life",
-            help="Half-life (months) for exponential decay weighting of recent data",
-        )
-    ] = 12.0,
     no_plots: Annotated[
         bool,
         typer.Option(
@@ -101,45 +66,72 @@ def process(
             help="Skip generating batch overlay plot",
         )
     ] = False,
+    export_format: Annotated[
+        Optional[str],
+        typer.Option(
+            "--format",
+            help="Export format: ac_forecast or ac_economic (overrides config)",
+        )
+    ] = None,
 ) -> None:
     """Process production data and generate decline forecasts.
 
     Reads production data from CSV/Excel files (Enverus or ARIES format),
-    fits hyperbolic decline curves, and exports ARIES-compatible forecasts.
+    fits hyperbolic decline curves with per-product parameters, and exports
+    ARIES-compatible forecasts.
+
+    Use a config file for per-product b-factor and dmin settings:
+        pyforecast process data.csv --config settings.yaml
 
     Example:
         pyforecast process data.csv -o forecasts/ --product oil
     """
-    # Validate products
-    valid_products = {"oil", "gas"}
-    products = [p.lower() for p in product]
-    for p in products:
-        if p not in valid_products:
-            typer.echo(f"Error: Invalid product '{p}'. Must be 'oil' or 'gas'.", err=True)
+    from ..batch.processor import BatchProcessor, BatchConfig
+    from ..core.fitting import FittingConfig
+
+    # Load config file or use defaults
+    if config:
+        typer.echo(f"Loading config from {config}")
+        pf_config = PyForecastConfig.from_yaml(config)
+    else:
+        pf_config = PyForecastConfig()
+
+    # CLI overrides
+    if product:
+        valid_products = {"oil", "gas", "water"}
+        products = [p.lower() for p in product]
+        for p in products:
+            if p not in valid_products:
+                typer.echo(f"Error: Invalid product '{p}'. Must be oil, gas, or water.", err=True)
+                raise typer.Exit(1)
+        pf_config.output.products = products  # type: ignore
+
+    if no_plots:
+        pf_config.output.plots = False
+    if no_batch_plot:
+        pf_config.output.batch_plot = False
+    if export_format:
+        if export_format not in ("ac_forecast", "ac_economic"):
+            typer.echo(f"Error: Invalid format '{export_format}'.", err=True)
             raise typer.Exit(1)
+        pf_config.output.format = export_format  # type: ignore
 
-    # Create configurations
-    fitting_config = FittingConfig(
-        b_min=b_min,
-        b_max=b_max,
-        dmin_annual=dmin,
-        regime_threshold=regime_threshold,
-        recency_half_life=recency_half_life,
-        min_points=min_points,
-    )
-
+    # Create batch config with per-product fitting configs
     batch_config = BatchConfig(
-        products=products,  # type: ignore
-        min_points=min_points,
+        products=pf_config.output.products,
+        min_points=pf_config.fitting.min_points,
         workers=workers,
-        fitting_config=fitting_config,
+        fitting_config=None,  # Will use per-product configs
+        pyforecast_config=pf_config,
         output_dir=output,
-        save_plots=not no_plots,
-        save_batch_plot=not no_batch_plot,
+        save_plots=pf_config.output.plots,
+        save_batch_plot=pf_config.output.batch_plot,
+        export_format=pf_config.output.format,
     )
 
     # Run batch processing
     typer.echo(f"Processing {len(input_files)} file(s)...")
+    typer.echo(f"Products: {', '.join(pf_config.output.products)}")
     processor = BatchProcessor(batch_config)
     result = processor.run(input_files, output)
 
@@ -176,7 +168,7 @@ def plot(
         str,
         typer.Option(
             "-p", "--product",
-            help="Product to plot: oil or gas",
+            help="Product to plot: oil, gas, or water",
         )
     ] = "oil",
     output: Annotated[
@@ -186,31 +178,19 @@ def plot(
             help="Output file path (default: show in browser)",
         )
     ] = None,
-    b_min: Annotated[
-        float,
-        typer.Option("--b-min", help="Minimum b-factor")
-    ] = 0.01,
-    b_max: Annotated[
-        float,
-        typer.Option("--b-max", help="Maximum b-factor")
-    ] = 1.5,
-    dmin: Annotated[
-        float,
-        typer.Option("--dmin", help="Terminal decline rate (annual)")
-    ] = 0.06,
-    regime_threshold: Annotated[
-        float,
-        typer.Option("--regime-threshold", help="Regime change threshold")
-    ] = 1.0,
-    recency_half_life: Annotated[
-        float,
-        typer.Option("--recency-half-life", help="Recency weighting half-life (months)")
-    ] = 12.0,
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-c", "--config",
+            help="YAML config file",
+            exists=True,
+        )
+    ] = None,
 ) -> None:
     """Plot decline curve for a single well.
 
-    Loads production data, fits a decline curve, and displays an interactive
-    semi-log plot with historical production and forecast.
+    Loads production data, fits a decline curve using product-specific
+    parameters from config, and displays an interactive semi-log plot.
 
     Example:
         pyforecast plot data.csv --well-id "42-001-00001" --product oil
@@ -219,12 +199,17 @@ def plot(
     from ..core.fitting import DeclineFitter, FittingConfig
     from ..visualization.plots import DeclinePlotter
 
-    # Validate product
-    if product.lower() not in ("oil", "gas"):
-        typer.echo(f"Error: Invalid product '{product}'. Must be 'oil' or 'gas'.", err=True)
-        raise typer.Exit(1)
+    # Load config
+    if config:
+        pf_config = PyForecastConfig.from_yaml(config)
+    else:
+        pf_config = PyForecastConfig()
 
+    # Validate product
     product = product.lower()
+    if product not in ("oil", "gas", "water"):
+        typer.echo(f"Error: Invalid product '{product}'. Must be oil, gas, or water.", err=True)
+        raise typer.Exit(1)
 
     # Load wells
     typer.echo(f"Loading data from {input_file}...")
@@ -252,16 +237,15 @@ def plot(
         well = wells[0]
         typer.echo(f"Using first well: {well.well_id}")
 
+    # Get product-specific fitting config
+    fitting_config = FittingConfig.from_pyforecast_config(pf_config, product)
+
     # Fit decline curve
     typer.echo(f"Fitting {product} decline curve...")
-    config = FittingConfig(
-        b_min=b_min,
-        b_max=b_max,
-        dmin_annual=dmin,
-        regime_threshold=regime_threshold,
-        recency_half_life=recency_half_life,
-    )
-    fitter = DeclineFitter(config)
+    typer.echo(f"  b range: [{fitting_config.b_min}, {fitting_config.b_max}]")
+    typer.echo(f"  Dmin: {fitting_config.dmin_annual:.1%}/year")
+
+    fitter = DeclineFitter(fitting_config)
 
     try:
         t = well.production.time_months
@@ -290,6 +274,35 @@ def plot(
         typer.echo(f"\nPlot saved to: {output}")
     else:
         fig.show()
+
+
+@app.command()
+def init(
+    output: Annotated[
+        Path,
+        typer.Option(
+            "-o", "--output",
+            help="Output file path",
+        )
+    ] = Path("pyforecast.yaml"),
+) -> None:
+    """Generate a default configuration file.
+
+    Creates a YAML config file with all available settings and their defaults.
+    Edit this file to customize per-product b-factor and dmin settings.
+
+    Example:
+        pyforecast init -o my_config.yaml
+    """
+    if output.exists():
+        overwrite = typer.confirm(f"{output} already exists. Overwrite?")
+        if not overwrite:
+            raise typer.Exit(0)
+
+    generate_default_config(output)
+    typer.echo(f"Config file created: {output}")
+    typer.echo("\nEdit this file to customize settings, then use:")
+    typer.echo(f"  pyforecast process data.csv --config {output}")
 
 
 @app.command()
