@@ -33,6 +33,7 @@ class AriesAcEconomicExporter:
     - EXPRESSION: ARIES decline expression
 
     Note: Exports use daily rates (B/D = barrels per day, M/D = mcf per day).
+    ARIES always uses EXP decline type regardless of b-factor value.
     """
 
     # Sequence numbers for each product
@@ -79,7 +80,8 @@ class AriesAcEconomicExporter:
         Format: "{Qn} X {unit} {Dmin%} EXP B/{b} {Di%}"
         Example: "100 X B/D 6 EXP B/0.50 8.5"
 
-        Note: qi in model is already daily rate; output directly.
+        Note: qi in model is daily rate; output directly.
+        ARIES always uses EXP regardless of b-factor value.
         """
         model = result.model
         unit = self.UNIT_MAP[product]

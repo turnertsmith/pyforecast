@@ -32,16 +32,16 @@ Example: "02/2025"
 ```
 
 ### Product Rows (OIL/GAS/WATER, SEQUENCE=100/300/500)
-Decline curve parameters.
+Decline curve parameters. Always uses EXP regardless of b-factor.
 ```
-EXPRESSION: "{qi} X {unit} {dmin%} {type} B/{b} {di%}"
+EXPRESSION: "{qi} X {unit} {dmin%} EXP B/{b} {di%}"
 
 Components:
 - qi: Initial rate (daily)
 - unit: B/D (oil/water) or M/D (gas)
 - dmin%: Terminal decline rate (annual %)
-- type: EXP, HYP, or HRM
-- b: Hyperbolic exponent
+- EXP: Always exponential (ARIES convention)
+- b: Hyperbolic exponent (stored but decline type is always EXP)
 - di%: Initial decline rate (annual %)
 
 Example: "85.3 X B/D 6 EXP B/0.50 8.5"
@@ -63,7 +63,7 @@ PROPNUM,SECTION,SEQUENCE,QUALIFIER,KEYWORD,EXPRESSION
 42-123-45678,4,2,KA0125,START,02/2025
 42-123-45678,4,100,KA0125,OIL,85.3 X B/D 6 EXP B/0.50 8.5
 42-123-45678,4,200,KA0125,",X 1 B/D X YRS EXP 6
-42-123-45678,4,300,KA0125,GAS,450 X M/D 6 HYP B/0.75 12
+42-123-45678,4,300,KA0125,GAS,450 X M/D 6 EXP B/0.75 12
 42-123-45678,4,400,KA0125,",X 1 M/D X YRS EXP 6
 ```
 
@@ -79,11 +79,9 @@ WELL001,4,300,KA0126,GAS,168.1 X M/D 6 EXP B/0.56 61.88
 WELL001,4,400,KA0126,",X 1 M/D X YRS EXP 6
 ```
 
-## Key Differences: Import vs Export
+## Key Points
 
-| Aspect | Import (ARIES) | Export (pyforecast) |
-|--------|---------------|---------------------|
-| START date | Parsed from file | Computed from last_date + 1 month |
-| CUMS | Typically from ARIES reserves | Computed from production history |
-| qi | Parsed from expression | Model's fitted qi (daily) |
-| Rates | Can be daily or monthly | Always daily (B/D, M/D) |
+- **Always EXP**: ARIES convention uses EXP for all decline types. The b-factor is stored but the keyword is always EXP.
+- **Daily rates**: Uses B/D (barrels/day) and M/D (mcf/day)
+- **START date**: Computed as month after last production date
+- **CUMS**: Cumulative production in MBbl and MMcf
