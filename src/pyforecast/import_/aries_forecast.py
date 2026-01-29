@@ -20,6 +20,7 @@ import csv
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -87,6 +88,7 @@ class AriesForecastParams:
         b: Hyperbolic exponent (0 = exponential, 1 = harmonic)
         dmin: Terminal decline rate (fraction/month)
         decline_type: Decline type string (EXP, HYP, HRM)
+        start_date: Forecast start date from START row (MM/YYYY format)
     """
     propnum: str
     product: Literal["oil", "gas", "water"]
@@ -95,6 +97,7 @@ class AriesForecastParams:
     b: float
     dmin: float  # monthly decline (fraction)
     decline_type: str  # EXP, HYP, HRM
+    start_date: date | None = None  # From START row
 
     @property
     def qi_monthly(self) -> float:
@@ -181,6 +184,7 @@ class AriesForecastImporter:
         """
         self._forecasts: dict[tuple[str, str], AriesForecastParams] = {}
         self._parse_failures: list[tuple[str, str, str]] = []  # (well_id, product, expression)
+        self._start_dates: dict[str, date] = {}  # normalized_id -> start_date
         self._lazy = lazy
         self._filepath: Path | None = None
         self._well_count: int = 0
@@ -291,7 +295,15 @@ class AriesForecastImporter:
         keyword = row.get("KEYWORD", "").strip().upper()
         expression = row.get("EXPRESSION", "").strip()
 
-        # Only process OIL, GAS, WATER keywords (skip CUMS, START, continuation rows)
+        # Parse START row for forecast start date
+        if keyword == "START":
+            start_date = self._parse_start_date(expression)
+            if start_date:
+                normalized_id = normalize_well_id(propnum)
+                self._start_dates[normalized_id] = start_date
+            return 0
+
+        # Only process OIL, GAS, WATER keywords (skip CUMS, continuation rows)
         if keyword not in ("OIL", "GAS", "WATER"):
             return 0
 
@@ -306,6 +318,10 @@ class AriesForecastImporter:
         if params is None:
             return 0
 
+        # Get start_date if available for this well
+        normalized_id = normalize_well_id(propnum)
+        start_date = self._start_dates.get(normalized_id)
+
         # Override product based on KEYWORD (more reliable than unit inference)
         params = AriesForecastParams(
             propnum=params.propnum,
@@ -315,10 +331,10 @@ class AriesForecastImporter:
             b=params.b,
             dmin=params.dmin,
             decline_type=params.decline_type,
+            start_date=start_date,
         )
 
         # Store with normalized ID for consistent lookup
-        normalized_id = normalize_well_id(propnum)
         key = (normalized_id, expected_product)
         self._forecasts[key] = params
         return 1
@@ -346,6 +362,26 @@ class AriesForecastImporter:
         for col in ("PROPNUM", "PROP_NUM", "WELL_ID", "API", "ENTITY_ID"):
             if col in row and row[col]:
                 return row[col].strip()
+        return None
+
+    def _parse_start_date(self, expression: str) -> date | None:
+        """Parse START expression 'MM/YYYY' to date.
+
+        Args:
+            expression: START row expression (e.g., "02/2025")
+
+        Returns:
+            date object for first of month, or None if parsing fails
+        """
+        try:
+            parts = expression.strip().split("/")
+            if len(parts) == 2:
+                month = int(parts[0])
+                year = int(parts[1])
+                if 1 <= month <= 12 and 1900 <= year <= 2100:
+                    return date(year, month, 1)
+        except (ValueError, IndexError):
+            pass
         return None
 
     def _parse_expression(
@@ -468,9 +504,16 @@ class AriesForecastImporter:
         normalized_id: str,
         product: str,
     ) -> AriesForecastParams | None:
-        """Stream through file to find specific well/product (lazy mode)."""
+        """Stream through file to find specific well/product (lazy mode).
+
+        Scans the entire file for the matching well to collect both
+        START date and product forecast data.
+        """
         if self._filepath is None:
             return None
+
+        start_date: date | None = None
+        found_params: AriesForecastParams | None = None
 
         with open(self._filepath, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
@@ -494,6 +537,11 @@ class AriesForecastImporter:
                     keyword = row.get("KEYWORD", "").strip().upper()
                     expression = row.get("EXPRESSION", "").strip()
 
+                    # Capture START date for this well
+                    if keyword == "START":
+                        start_date = self._parse_start_date(expression)
+                        continue
+
                     if keyword not in ("OIL", "GAS", "WATER"):
                         continue
 
@@ -503,16 +551,9 @@ class AriesForecastImporter:
 
                     params = self._parse_expression(propnum, expression, product_hint=product)
                     if params:
-                        # Override product based on keyword
-                        return AriesForecastParams(
-                            propnum=params.propnum,
-                            product=product,
-                            qi=params.qi,
-                            di=params.di,
-                            b=params.b,
-                            dmin=params.dmin,
-                            decline_type=params.decline_type,
-                        )
+                        found_params = params
+                        # Continue scanning to find START if not yet found
+
                 else:
                     # Flat format - try to find matching product
                     for col, value in row.items():
@@ -521,6 +562,19 @@ class AriesForecastImporter:
                         params = self._parse_expression(propnum, value.strip())
                         if params and params.product == product:
                             return params
+
+        # Return params with start_date if found
+        if found_params:
+            return AriesForecastParams(
+                propnum=found_params.propnum,
+                product=product,
+                qi=found_params.qi,
+                di=found_params.di,
+                b=found_params.b,
+                dmin=found_params.dmin,
+                decline_type=found_params.decline_type,
+                start_date=start_date,
+            )
 
         return None
 

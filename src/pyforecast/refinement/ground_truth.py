@@ -7,6 +7,7 @@ ARIES forecasts to measure fitting accuracy.
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -161,6 +162,31 @@ class GroundTruthValidator:
         else:
             cumulative_diff_pct = 0.0
 
+        # Get start dates for alignment check
+        aries_start = aries_params.start_date
+        pyf_start: date | None = None
+
+        # Calculate pyforecast start date (month after last production)
+        if well.production.last_date:
+            last = well.production.last_date
+            if last.month == 12:
+                pyf_start = date(last.year + 1, 1, 1)
+            else:
+                pyf_start = date(last.year, last.month + 1, 1)
+
+        # Check alignment and generate warning if dates differ
+        alignment_warning: str | None = None
+        if aries_start and pyf_start:
+            diff_months = abs(
+                (aries_start.year - pyf_start.year) * 12 +
+                (aries_start.month - pyf_start.month)
+            )
+            if diff_months > 0:
+                alignment_warning = (
+                    f"Start dates differ by {diff_months} month(s): "
+                    f"ARIES={aries_start:%Y-%m}, pyf={pyf_start:%Y-%m}"
+                )
+
         return GroundTruthResult(
             well_id=well.well_id,
             product=product,
@@ -182,6 +208,9 @@ class GroundTruthValidator:
             forecast_months=t,
             aries_rates=aries_rates,
             pyf_rates=pyf_rates,
+            aries_start_date=aries_start,
+            pyf_start_date=pyf_start,
+            alignment_warning=alignment_warning,
         )
 
     def _validate_rates(

@@ -2,6 +2,7 @@
 
 import csv
 import tempfile
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
@@ -806,3 +807,216 @@ class TestRateValidation:
         assert not np.any(cleaned < 0)
         assert cleaned[1] == 0.0
         assert cleaned[3] == 0.0
+
+
+class TestDateAlignment:
+    """Tests for forecast start date alignment checking."""
+
+    def _create_mock_well_with_production(
+        self, well_id, propnum, last_prod_date, qi=100.0, di=0.01, b=0.5
+    ):
+        """Create a mock well with forecast and production data."""
+        well = MagicMock()
+        well.well_id = well_id
+        well.identifier.propnum = propnum
+        well.identifier.api = None
+        well.identifier.entity_id = None
+
+        # Mock production data with last_date
+        well.production.last_date = last_prod_date
+
+        # Create real HyperbolicModel
+        model = HyperbolicModel(qi=qi, di=di, b=b, dmin=0.005)
+        forecast = MagicMock()
+        forecast.model = model
+        well.get_forecast.return_value = forecast
+
+        return well
+
+    def _create_importer_with_start_date(
+        self, propnum, product, start_date, qi=100.0, di=0.01, b=0.5
+    ):
+        """Create an importer with specific parameters including start_date."""
+        importer = AriesForecastImporter()
+        params = AriesForecastParams(
+            propnum=propnum,
+            product=product,
+            qi=qi,
+            di=di,
+            b=b,
+            dmin=0.005,
+            decline_type="HYP",
+            start_date=start_date,
+        )
+        importer._forecasts[(propnum, product)] = params
+        return importer
+
+    def test_aligned_dates_no_warning(self):
+        """Test no warning when ARIES and pyforecast start dates match."""
+        # ARIES start: Feb 2025
+        # pyforecast: last production Jan 2025 -> forecast starts Feb 2025
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", date(2025, 2, 1)
+        )
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", date(2025, 1, 15)  # Last prod mid-Jan
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.aries_start_date == date(2025, 2, 1)
+        assert result.pyf_start_date == date(2025, 2, 1)
+        assert result.alignment_warning is None
+
+    def test_misaligned_dates_warning(self):
+        """Test warning generated when dates differ by 3 months."""
+        # ARIES start: Feb 2025
+        # pyforecast: last production Oct 2024 -> forecast starts Nov 2024 (3 month diff)
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", date(2025, 2, 1)
+        )
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", date(2024, 10, 15)  # Last prod mid-Oct
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.aries_start_date == date(2025, 2, 1)
+        assert result.pyf_start_date == date(2024, 11, 1)
+        assert result.alignment_warning is not None
+        assert "3 month(s)" in result.alignment_warning
+        assert "ARIES=2025-02" in result.alignment_warning
+        assert "pyf=2024-11" in result.alignment_warning
+
+    def test_pyf_start_date_december_rollover(self):
+        """Test pyf start date calculation rolls over December to January."""
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", date(2025, 1, 1)
+        )
+        # Last production in December -> forecast starts January
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", date(2024, 12, 15)
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.pyf_start_date == date(2025, 1, 1)
+        assert result.alignment_warning is None  # Dates match
+
+    def test_no_aries_start_date(self):
+        """Test no warning when ARIES has no start date."""
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", None  # No start date
+        )
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", date(2024, 10, 15)
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.aries_start_date is None
+        assert result.pyf_start_date == date(2024, 11, 1)
+        assert result.alignment_warning is None  # Can't compare
+
+    def test_no_pyf_production_date(self):
+        """Test no warning when pyforecast has no production date."""
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", date(2025, 2, 1)
+        )
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", None  # No last_date
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.aries_start_date == date(2025, 2, 1)
+        assert result.pyf_start_date is None
+        assert result.alignment_warning is None  # Can't compare
+
+    def test_one_month_difference_warning(self):
+        """Test warning for 1 month difference."""
+        importer = self._create_importer_with_start_date(
+            "test-well", "oil", date(2025, 3, 1)
+        )
+        well = self._create_mock_well_with_production(
+            "test-well", "test-well", date(2025, 1, 15)  # Feb start
+        )
+
+        validator = GroundTruthValidator(importer)
+        result = validator.validate(well, "oil")
+
+        assert result is not None
+        assert result.alignment_warning is not None
+        assert "1 month(s)" in result.alignment_warning
+
+    def test_result_summary_includes_alignment(self):
+        """Test that result.summary() includes alignment fields."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=5.0,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=2.0,
+            aries_start_date=date(2025, 2, 1),
+            pyf_start_date=date(2024, 11, 1),
+            alignment_warning="Start dates differ by 3 month(s)",
+        )
+
+        summary = result.summary()
+
+        assert summary["aries_start_date"] == "2025-02-01"
+        assert summary["pyf_start_date"] == "2024-11-01"
+        assert summary["alignment_warning"] == "Start dates differ by 3 month(s)"
+
+    def test_result_summary_handles_none_dates(self):
+        """Test that result.summary() handles None dates."""
+        result = GroundTruthResult(
+            well_id="test-well",
+            product="oil",
+            aries_qi=100.0,
+            aries_di=0.01,
+            aries_b=0.5,
+            aries_decline_type="HYP",
+            pyf_qi=100.0,
+            pyf_di=0.01,
+            pyf_b=0.5,
+            qi_pct_diff=0.0,
+            di_pct_diff=0.0,
+            b_abs_diff=0.0,
+            comparison_months=60,
+            mape=5.0,
+            correlation=0.99,
+            bias=0.0,
+            cumulative_diff_pct=2.0,
+            aries_start_date=None,
+            pyf_start_date=None,
+            alignment_warning=None,
+        )
+
+        summary = result.summary()
+
+        assert summary["aries_start_date"] is None
+        assert summary["pyf_start_date"] is None
+        assert summary["alignment_warning"] is None

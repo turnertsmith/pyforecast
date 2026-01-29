@@ -1154,6 +1154,9 @@ def _save_ground_truth_csv(
             "di_pct_diff",
             "b_abs_diff",
             "comparison_months",
+            "aries_start_date",
+            "pyf_start_date",
+            "alignment_warning",
         ])
 
         for r in results:
@@ -1162,7 +1165,7 @@ def _save_ground_truth_csv(
                 r.product,
                 r.match_grade,
                 r.is_good_match,
-                round(r.mape, 2),
+                round(r.mape, 2) if r.mape is not None else "",
                 round(r.correlation, 4),
                 round(r.bias, 4),
                 round(r.cumulative_diff_pct, 2),
@@ -1177,6 +1180,9 @@ def _save_ground_truth_csv(
                 round(r.di_pct_diff, 2),
                 round(r.b_abs_diff, 3),
                 r.comparison_months,
+                r.aries_start_date.isoformat() if r.aries_start_date else "",
+                r.pyf_start_date.isoformat() if r.pyf_start_date else "",
+                r.alignment_warning or "",
             ])
 
 
@@ -1194,6 +1200,9 @@ def _save_ground_truth_report(
     """
     report_path = output_dir / "ground_truth_report.txt"
 
+    # Count alignment warnings
+    alignment_warnings = [r for r in results if r.alignment_warning]
+
     with open(report_path, "w") as f:
         f.write("PyForecast Ground Truth Comparison Report\n")
         f.write("=" * 50 + "\n\n")
@@ -1206,6 +1215,8 @@ def _save_ground_truth_report(
         f.write(f"  Average correlation: {summary['avg_correlation']:.3f}\n")
         f.write(f"  Average cumulative diff: {summary['avg_cumulative_diff_pct']:.1f}%\n")
         f.write(f"  Good match rate: {summary['good_match_pct']:.1f}%\n")
+        if alignment_warnings:
+            f.write(f"  Wells with date misalignment: {len(alignment_warnings)} of {summary['count']}\n")
         f.write("\n")
 
         # Grade distribution
@@ -1231,8 +1242,11 @@ def _save_ground_truth_report(
         f.write("Detailed Results:\n")
         f.write("-" * 50 + "\n")
 
-        # Sort by match grade then MAPE
-        sorted_results = sorted(results, key=lambda r: (r.match_grade, r.mape))
+        # Sort by match grade then MAPE (handle None MAPE)
+        sorted_results = sorted(
+            results,
+            key=lambda r: (r.match_grade, r.mape if r.mape is not None else float('inf'))
+        )
 
         for r in sorted_results:
             status = "GOOD" if r.is_good_match else "----"
@@ -1240,8 +1254,11 @@ def _save_ground_truth_report(
             f.write(f"  ARIES:      qi={r.aries_qi:.1f}, di={r.aries_di*12:.1%}/yr, b={r.aries_b:.3f}\n")
             f.write(f"  pyforecast: qi={r.pyf_qi:.1f}, di={r.pyf_di*12:.1%}/yr, b={r.pyf_b:.3f}\n")
             f.write(f"  Differences: qi={r.qi_pct_diff:+.1f}%, di={r.di_pct_diff:+.1f}%, b={r.b_abs_diff:+.3f}\n")
-            f.write(f"  Metrics: MAPE={r.mape:.1f}%, corr={r.correlation:.3f}, "
+            mape_str = f"{r.mape:.1f}%" if r.mape is not None else "N/A"
+            f.write(f"  Metrics: MAPE={mape_str}, corr={r.correlation:.3f}, "
                    f"bias={r.bias:.1%}, cum_diff={r.cumulative_diff_pct:+.1f}%\n")
+            if r.alignment_warning:
+                f.write(f"  Warning: {r.alignment_warning}\n")
 
 
 if __name__ == "__main__":

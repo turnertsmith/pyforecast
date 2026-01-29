@@ -5,7 +5,7 @@ residual analysis, and ground truth comparison.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 import uuid
 
@@ -514,6 +514,11 @@ class GroundTruthResult:
     aries_rates: np.ndarray = field(default_factory=lambda: np.array([]))
     pyf_rates: np.ndarray = field(default_factory=lambda: np.array([]))
 
+    # Date alignment fields
+    aries_start_date: date | None = None
+    pyf_start_date: date | None = None
+    alignment_warning: str | None = None
+
     @property
     def mape_valid(self) -> bool:
         """Check if MAPE was successfully calculated.
@@ -630,4 +635,7 @@ class GroundTruthResult:
             "cumulative_diff_pct": self.cumulative_diff_pct,
             "is_good_match": self.is_good_match,
             "match_grade": self.match_grade,
+            "aries_start_date": self.aries_start_date.isoformat() if self.aries_start_date else None,
+            "pyf_start_date": self.pyf_start_date.isoformat() if self.pyf_start_date else None,
+            "alignment_warning": self.alignment_warning,
         }
