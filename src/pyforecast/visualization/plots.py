@@ -58,9 +58,9 @@ class DeclinePlotter:
         production = well.production
         result = well.get_forecast(product)
 
-        # Get production data
+        # Get production data as daily rates (normalized for month length)
         t = production.time_months
-        q = production.get_product(product)
+        q = production.get_product_daily(product)
 
         # Historical production scatter
         fig.add_trace(go.Scatter(
@@ -136,7 +136,9 @@ class DeclinePlotter:
             ))
 
         # Configure layout
-        product_label = "Oil (bbl/month)" if product == "oil" else "Gas (mcf/month)"
+        product_label = "Oil (bbl/day)" if product == "oil" else "Gas (mcf/day)"
+        if product == "water":
+            product_label = "Water (bbl/day)"
 
         fig.update_layout(
             title=dict(
@@ -202,8 +204,9 @@ class DeclinePlotter:
             color = self.COLORS[i % len(self.COLORS)]
             result = well.get_forecast(product)
 
+            # Use daily rates (normalized for month length)
             t = well.production.time_months
-            q = well.production.get_product(product)
+            q = well.production.get_product_daily(product)
 
             if normalize and len(q) > 0 and q[0] > 0:
                 q = q / q[0]
@@ -240,9 +243,14 @@ class DeclinePlotter:
                 ))
 
         # Configure layout
-        y_label = "Normalized Rate" if normalize else (
-            "Oil (bbl/month)" if product == "oil" else "Gas (mcf/month)"
-        )
+        if normalize:
+            y_label = "Normalized Rate"
+        elif product == "oil":
+            y_label = "Oil (bbl/day)"
+        elif product == "gas":
+            y_label = "Gas (mcf/day)"
+        else:
+            y_label = "Water (bbl/day)"
 
         fig.update_layout(
             title=f"Multi-Well Decline Comparison ({len(wells)} wells)",
@@ -280,7 +288,8 @@ class DeclinePlotter:
         t = well.production.time_months
 
         for row, product in enumerate(["oil", "gas"], start=1):
-            q = well.production.get_product(product)
+            # Use daily rates (normalized for month length)
+            q = well.production.get_product_daily(product)
             result = well.get_forecast(product)
             color = "#1f77b4" if product == "oil" else "#ff7f0e"
 

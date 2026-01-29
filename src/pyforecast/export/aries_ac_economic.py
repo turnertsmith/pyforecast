@@ -31,7 +31,13 @@ class AriesAcEconomicExporter:
     - QUALIFIER: Date-based qualifier (e.g., "KA0125")
     - KEYWORD: CUMS, START, OIL, GAS, WATER, or " for continuation
     - EXPRESSION: ARIES decline expression
+
+    Note: Internal model uses daily rates; this exporter converts to monthly
+    for ARIES compatibility (B/M = barrels per month).
     """
+
+    # Average days per month (365.25/12) for daily-to-monthly conversion
+    DAYS_PER_MONTH = 30.4375
 
     # Sequence numbers for each product
     SEQUENCE_MAP = {
@@ -76,12 +82,15 @@ class AriesAcEconomicExporter:
 
         Format: "{Qn} X {unit} {Dmin%} EXP B/{b} {Di%}"
         Example: "1000 X B/M 6 EXP B/0.50 8.5"
+
+        Note: qi in model is daily rate; convert to monthly for ARIES.
         """
         model = result.model
         unit = self.UNIT_MAP[product]
 
-        # Round qi to nearest 10
-        qn = int(round(model.qi, -1))
+        # Convert qi from daily to monthly rate, then round to nearest 10
+        qi_monthly = model.qi * self.DAYS_PER_MONTH
+        qn = int(round(qi_monthly, -1))
 
         # Convert rates to annual percentage
         dmin_pct = model.dmin * 12 * 100  # Monthly to annual %
@@ -182,8 +191,8 @@ class AriesAcEconomicExporter:
             if result is None:
                 continue
 
-            # Skip if qi is effectively zero
-            if result.model.qi < 10:
+            # Skip if qi is effectively zero (qi is daily rate, ~0.3/day = ~10/month)
+            if result.model.qi < 0.3:
                 continue
 
             seq = self.SEQUENCE_MAP[product]

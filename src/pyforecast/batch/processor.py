@@ -181,10 +181,11 @@ def _fit_single_well(
             fitter = DeclineFitter(config)
 
             t = well.production.time_months
-            q = well.production.get_product(product)
+            # Use daily rates for fitting to normalize for varying month lengths
+            q = well.production.get_product_daily(product)
 
-            # Skip if no significant production
-            if q.max() < 1.0:
+            # Skip if no significant production (daily rate threshold)
+            if q.max() < 0.1:
                 continue
 
             # Run data quality validation

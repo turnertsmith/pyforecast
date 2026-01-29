@@ -15,7 +15,13 @@ class JsonExporter:
 
     Produces a structured JSON file containing configuration, well data,
     forecast parameters, and validation results.
+
+    Note: Internal model uses daily rates. The JSON export includes both
+    daily rates (qi) and monthly equivalents (qi_monthly) for convenience.
     """
+
+    # Average days per month (365.25/12) for daily-to-monthly conversion
+    DAYS_PER_MONTH = 30.4375
 
     def __init__(
         self,
@@ -82,8 +88,16 @@ class JsonExporter:
                 "rate": round(rate, 2),
             })
 
+        # qi is daily rate; also provide monthly for convenience
+        qi_monthly = model.qi * self.DAYS_PER_MONTH
+        unit = "bbl/day" if product in ("oil", "water") else "mcf/day"
+        unit_monthly = "bbl/month" if product in ("oil", "water") else "mcf/month"
+
         return {
             "qi": round(model.qi, 2),
+            "qi_unit": unit,
+            "qi_monthly": round(qi_monthly, 2),
+            "qi_monthly_unit": unit_monthly,
             "di": round(model.di * 12, 6),  # Annual decline
             "b": round(model.b, 4),
             "dmin": round(model.dmin * 12, 6),  # Annual terminal decline

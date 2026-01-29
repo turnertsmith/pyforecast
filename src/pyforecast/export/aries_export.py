@@ -19,12 +19,18 @@ class AriesExporter:
     - KEYWORD: Product (OIL, GAS)
     - START_DATE: Forecast start (YYYYMM)
     - END_DATE: Forecast end (YYYYMM)
-    - START_VALUE: Initial rate (qi)
-    - END_VALUE: Economic limit rate
+    - START_VALUE: Initial rate (qi) in monthly units
+    - END_VALUE: Economic limit rate in monthly units
     - DECLINE_TYPE: EXP, HYP, or HRM
-    - DECLINE_RATE: Nominal decline rate
+    - DECLINE_RATE: Nominal decline rate (annual)
     - B_FACTOR: Hyperbolic b factor
+
+    Note: Internal model uses daily rates; this exporter converts to monthly
+    for ARIES compatibility.
     """
+
+    # Average days per month (365.25/12) for daily-to-monthly conversion
+    DAYS_PER_MONTH = 30.4375
 
     def __init__(
         self,
@@ -59,7 +65,10 @@ class AriesExporter:
         Returns:
             Forecast end date
         """
-        econ_limit = self.economic_limit_oil if product == "oil" else self.economic_limit_gas
+        # Economic limits are in monthly units, convert to daily for comparison
+        # since model.rate() returns daily rates
+        econ_limit_monthly = self.economic_limit_oil if product == "oil" else self.economic_limit_gas
+        econ_limit_daily = econ_limit_monthly / self.DAYS_PER_MONTH
         model = result.model
 
         # Binary search for time to reach economic limit
@@ -69,7 +78,7 @@ class AriesExporter:
         while t_high - t_low > 1:
             t_mid = (t_low + t_high) // 2
             rate = model.rate(t_mid)
-            if rate[0] > econ_limit:
+            if rate[0] > econ_limit_daily:
                 t_low = t_mid
             else:
                 t_high = t_mid
@@ -128,13 +137,16 @@ class AriesExporter:
             # Economic limit for this product
             econ_limit = self.economic_limit_oil if product == "oil" else self.economic_limit_gas
 
+            # Convert qi from daily to monthly rate
+            qi_monthly = model.qi * self.DAYS_PER_MONTH
+
             row = {
                 "PROPNUM": propnum,
                 "SEQUENCE": seq,
                 "KEYWORD": product.upper(),
                 "START_DATE": self._format_yyyymm(start_date),
                 "END_DATE": self._format_yyyymm(end_date),
-                "START_VALUE": round(model.qi, 2),
+                "START_VALUE": round(qi_monthly, 2),
                 "END_VALUE": round(econ_limit, 2),
                 "DECLINE_TYPE": model.decline_type,
                 "DECLINE_RATE": round(model.di * 12, 6),  # Convert to annual

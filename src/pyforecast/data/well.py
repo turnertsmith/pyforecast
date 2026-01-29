@@ -39,19 +39,21 @@ class ProductionData:
 
     Attributes:
         dates: Array of production dates (first of month)
-        oil: Oil production rates (bbl/month)
-        gas: Gas production rates (mcf/month)
-        water: Water production rates (bbl/month), optional
+        oil: Oil production volumes (bbl/month total)
+        gas: Gas production volumes (mcf/month total)
+        water: Water production volumes (bbl/month total), optional
         time_months: Time in months from first production (computed)
+        days_in_month: Days in each month (computed from dates)
     """
     dates: np.ndarray  # datetime64
     oil: np.ndarray
     gas: np.ndarray
     water: np.ndarray | None = None
     time_months: np.ndarray = field(init=False)
+    days_in_month: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
-        """Compute time_months from dates."""
+        """Compute time_months and days_in_month from dates."""
         if len(self.dates) > 0:
             # Convert to months from first date
             dates_dt = pd.to_datetime(self.dates)
@@ -61,17 +63,21 @@ class ProductionData:
                 (dates_dt.month - first_date.month)
             )
             self.time_months = months_diff.values.astype(float)
+
+            # Compute days in each month
+            self.days_in_month = dates_dt.to_series().dt.daysinmonth.values.astype(float)
         else:
             self.time_months = np.array([], dtype=float)
+            self.days_in_month = np.array([], dtype=float)
 
     def get_product(self, product: Literal["oil", "gas", "water"]) -> np.ndarray:
-        """Get production array for specified product.
+        """Get monthly production volume array for specified product.
 
         Args:
             product: Product type ("oil", "gas", or "water")
 
         Returns:
-            Production rate array
+            Monthly production volume array
 
         Raises:
             ValueError: If product not available
@@ -86,6 +92,49 @@ class ProductionData:
             return self.water
         else:
             raise ValueError(f"Unknown product: {product}")
+
+    def get_product_daily(self, product: Literal["oil", "gas", "water"]) -> np.ndarray:
+        """Get daily production rate array for specified product.
+
+        Converts monthly volumes to daily rates by dividing by days in month.
+        This normalizes for varying month lengths (28-31 days).
+
+        Args:
+            product: Product type ("oil", "gas", or "water")
+
+        Returns:
+            Daily production rate array
+
+        Raises:
+            ValueError: If product not available
+        """
+        monthly = self.get_product(product)
+        if len(self.days_in_month) == 0:
+            return monthly
+        return monthly / self.days_in_month
+
+    @property
+    def oil_daily(self) -> np.ndarray:
+        """Oil production as daily rate (bbl/day)."""
+        if len(self.days_in_month) == 0:
+            return self.oil
+        return self.oil / self.days_in_month
+
+    @property
+    def gas_daily(self) -> np.ndarray:
+        """Gas production as daily rate (mcf/day)."""
+        if len(self.days_in_month) == 0:
+            return self.gas
+        return self.gas / self.days_in_month
+
+    @property
+    def water_daily(self) -> np.ndarray | None:
+        """Water production as daily rate (bbl/day)."""
+        if self.water is None:
+            return None
+        if len(self.days_in_month) == 0:
+            return self.water
+        return self.water / self.days_in_month
 
     @property
     def n_months(self) -> int:

@@ -266,16 +266,18 @@ def plot(
 
     try:
         t = well.production.time_months
-        q = well.production.get_product(product)  # type: ignore
+        # Use daily rates for fitting to normalize for varying month lengths
+        q = well.production.get_product_daily(product)  # type: ignore
         result = fitter.fit(t, q)
         well.set_forecast(product, result)  # type: ignore
     except ValueError as e:
         typer.echo(f"Error fitting curve: {e}", err=True)
         raise typer.Exit(1)
 
-    # Report fit quality
+    # Report fit quality (qi is daily rate)
+    unit = "bbl/day" if product in ("oil", "water") else "mcf/day"
     typer.echo(f"\nFit Results:")
-    typer.echo(f"  qi: {result.model.qi:.1f}")
+    typer.echo(f"  qi: {result.model.qi:.1f} {unit}")
     typer.echo(f"  Di: {result.model.di * 12:.1%}/year")
     typer.echo(f"  b: {result.model.b:.3f}")
     typer.echo(f"  R²: {result.r_squared:.3f}")
