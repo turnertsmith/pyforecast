@@ -32,12 +32,8 @@ class AriesAcEconomicExporter:
     - KEYWORD: CUMS, START, OIL, GAS, WATER, or " for continuation
     - EXPRESSION: ARIES decline expression
 
-    Note: Internal model uses daily rates; this exporter converts to monthly
-    for ARIES compatibility (B/M = barrels per month).
+    Note: Exports use daily rates (B/D = barrels per day, M/D = mcf per day).
     """
-
-    # Average days per month (365.25/12) for daily-to-monthly conversion
-    DAYS_PER_MONTH = 30.4375
 
     # Sequence numbers for each product
     SEQUENCE_MAP = {
@@ -46,11 +42,11 @@ class AriesAcEconomicExporter:
         "water": 500,
     }
 
-    # Unit codes for ARIES expressions
+    # Unit codes for ARIES expressions (daily rates)
     UNIT_MAP = {
-        "oil": "B/M",    # Barrels per month
-        "gas": "M/M",    # Mcf per month
-        "water": "B/M",  # Barrels per month
+        "oil": "B/D",    # Barrels per day
+        "gas": "M/D",    # Mcf per day
+        "water": "B/D",  # Barrels per day
     }
 
     def __init__(
@@ -81,16 +77,15 @@ class AriesAcEconomicExporter:
         """Format the ARIES decline expression.
 
         Format: "{Qn} X {unit} {Dmin%} EXP B/{b} {Di%}"
-        Example: "1000 X B/M 6 EXP B/0.50 8.5"
+        Example: "100 X B/D 6 EXP B/0.50 8.5"
 
-        Note: qi in model is daily rate; convert to monthly for ARIES.
+        Note: qi in model is already daily rate; output directly.
         """
         model = result.model
         unit = self.UNIT_MAP[product]
 
-        # Convert qi from daily to monthly rate, then round to nearest 10
-        qi_monthly = model.qi * self.DAYS_PER_MONTH
-        qn = int(round(qi_monthly, -1))
+        # qi is already daily, round to 1 decimal place
+        qn = round(model.qi, 1)
 
         # Convert rates to annual percentage
         dmin_pct = model.dmin * 12 * 100  # Monthly to annual %
@@ -100,7 +95,7 @@ class AriesAcEconomicExporter:
         if di_pct <= dmin_pct:
             di_pct = dmin_pct + 0.1
 
-        qn_str = str(qn)
+        qn_str = _format_decimal(qn)
         dmin_str = _format_decimal(dmin_pct)
         di_str = _format_decimal(di_pct)
         b_str = f"{model.b:.2f}"
@@ -116,8 +111,8 @@ class AriesAcEconomicExporter:
 
         Format: "X 1 {unit} X YRS EXP {Dmin%}"
         """
-        model = result.model
         unit = self.UNIT_MAP[product]
+        model = result.model
         dmin_pct = model.dmin * 12 * 100
         dmin_str = _format_decimal(dmin_pct)
 
