@@ -12,6 +12,7 @@ from scipy import optimize
 from scipy.stats import linregress
 
 from .models import HyperbolicModel, ForecastResult
+from .regime_detection import detect_regime_change_improved, RegimeDetectionConfig
 
 
 @dataclass
@@ -23,6 +24,8 @@ class FittingConfig:
         b_max: Maximum b factor (default 1.5, super-harmonic)
         dmin_annual: Terminal decline rate as annual fraction (default 0.06 = 6%)
         regime_threshold: Fractional increase to detect regime change (default 1.0 = 100%)
+        regime_window: Window size for trend fitting in regime detection (default 6)
+        regime_sustained_months: Months elevation must be sustained to confirm regime change (default 2)
         recency_half_life: Half-life in months for exponential decay weighting (default 12)
             Lower values = more aggressive weighting toward recent data
         min_points: Minimum data points required for fitting (default 6)
@@ -31,6 +34,8 @@ class FittingConfig:
     b_max: float = 1.5
     dmin_annual: float = 0.06
     regime_threshold: float = 1.0
+    regime_window: int = 6
+    regime_sustained_months: int = 2
     recency_half_life: float = 12.0
     min_points: int = 6
 
@@ -54,39 +59,30 @@ class DeclineFitter:
     def detect_regime_change(
         self,
         rates: np.ndarray,
-        window: int = 3
+        window: int | None = None
     ) -> int:
         """Detect the most recent regime change in production data.
 
-        A regime change is identified when production increases by more than
-        the threshold from the recent moving average. This captures RTP
-        (return to production) and refrac events.
+        Uses trend extrapolation to detect regime changes (RTP, refrac).
+        A regime change is confirmed when:
+        1. Production exceeds projected trend by threshold percentage
+        2. The elevation is sustained for configured number of months
 
         Args:
             rates: Production rates array (chronological order)
-            window: Moving average window size for baseline
+            window: Window size for trend fitting (uses config default if None)
 
         Returns:
             Index of the start of the current regime (0 if no change detected)
         """
-        if len(rates) < window + 1:
-            return 0
-
-        regime_start = 0
-
-        # Scan backwards to find most recent regime change
-        for i in range(len(rates) - 1, window - 1, -1):
-            # Calculate baseline from prior window
-            baseline = np.mean(rates[i - window:i])
-
-            if baseline > 0:
-                increase = (rates[i] - baseline) / baseline
-
-                if increase >= self.config.regime_threshold:
-                    regime_start = i
-                    break
-
-        return regime_start
+        regime_config = RegimeDetectionConfig(
+            window_size=window or self.config.regime_window,
+            n_sigma=2.5,
+            min_pct_increase=self.config.regime_threshold,
+            sustained_months=self.config.regime_sustained_months,
+            min_data_points=self.config.min_points,
+        )
+        return detect_regime_change_improved(rates, regime_config)
 
     def compute_weights(
         self,
