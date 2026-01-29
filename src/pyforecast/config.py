@@ -61,7 +61,7 @@ class OutputConfig:
         batch_plot: Generate batch overlay plot (default: True)
         format: Export format - 'ac_forecast' or 'ac_economic' (default: ac_economic)
     """
-    products: list[Literal["oil", "gas", "water"]] = field(default_factory=lambda: ["oil", "gas"])
+    products: list[Literal["oil", "gas", "water"]] = field(default_factory=lambda: ["oil", "gas", "water"])
     plots: bool = True
     batch_plot: bool = True
     format: Literal["ac_forecast", "ac_economic"] = "ac_economic"
@@ -244,6 +244,7 @@ output:
   products:               # Products to forecast
     - oil
     - gas
+    - water
   plots: true             # Generate individual well plots
   batch_plot: true        # Generate multi-well overlay plot
   format: ac_economic     # Export format: ac_forecast or ac_economic
