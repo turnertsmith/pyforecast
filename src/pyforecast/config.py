@@ -68,6 +68,45 @@ class OutputConfig:
 
 
 @dataclass
+class RefinementConfig:
+    """Refinement configuration for fit quality analysis and learning.
+
+    All refinement features are disabled by default - zero impact on
+    existing workflows. Enable features as needed for analysis.
+
+    Attributes:
+        enable_logging: Log fit metadata to persistent storage
+        log_storage: Storage type - "sqlite" or "csv"
+        log_path: Path to storage file (None = ~/.pyforecast/fit_logs.db)
+        enable_hindcast: Run hindcast validation during fitting
+        hindcast_holdout_months: Months to hold out for hindcast validation
+        min_training_months: Minimum training data required for hindcast
+        enable_residual_analysis: Compute residual diagnostics
+        known_events_file: CSV file with known regime events for calibration
+        enable_learning: Enable parameter learning/suggestions
+    """
+
+    # Logging settings
+    enable_logging: bool = False
+    log_storage: Literal["sqlite", "csv"] = "sqlite"
+    log_path: str | None = None  # None = ~/.pyforecast/fit_logs.db
+
+    # Hindcast settings
+    enable_hindcast: bool = False
+    hindcast_holdout_months: int = 6
+    min_training_months: int = 12
+
+    # Residual analysis
+    enable_residual_analysis: bool = False
+
+    # Regime calibration
+    known_events_file: str | None = None
+
+    # Parameter learning
+    enable_learning: bool = False
+
+
+@dataclass
 class ValidationConfig:
     """Validation configuration.
 
@@ -107,6 +146,7 @@ class PyForecastConfig:
         fitting: General fitting parameters
         output: Output configuration
         validation: Validation configuration
+        refinement: Refinement configuration (fit quality analysis)
     """
     oil: ProductConfig = field(default_factory=ProductConfig)
     gas: ProductConfig = field(default_factory=ProductConfig)
@@ -115,6 +155,7 @@ class PyForecastConfig:
     fitting: FittingDefaults = field(default_factory=FittingDefaults)
     output: OutputConfig = field(default_factory=OutputConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+    refinement: RefinementConfig = field(default_factory=RefinementConfig)
 
     def get_product_config(self, product: Literal["oil", "gas", "water"]) -> ProductConfig:
         """Get configuration for a specific product."""
@@ -236,6 +277,10 @@ class PyForecastConfig:
         if "validation" in data:
             config.validation = ValidationConfig(**data["validation"])
 
+        # Refinement config
+        if "refinement" in data:
+            config.refinement = RefinementConfig(**data["refinement"])
+
         return config
 
     def to_dict(self) -> dict:
@@ -282,6 +327,17 @@ class PyForecastConfig:
                 "min_r_squared": self.validation.min_r_squared,
                 "max_annual_decline": self.validation.max_annual_decline,
                 "strict_mode": self.validation.strict_mode,
+            },
+            "refinement": {
+                "enable_logging": self.refinement.enable_logging,
+                "log_storage": self.refinement.log_storage,
+                "log_path": self.refinement.log_path,
+                "enable_hindcast": self.refinement.enable_hindcast,
+                "hindcast_holdout_months": self.refinement.hindcast_holdout_months,
+                "min_training_months": self.refinement.min_training_months,
+                "enable_residual_analysis": self.refinement.enable_residual_analysis,
+                "known_events_file": self.refinement.known_events_file,
+                "enable_learning": self.refinement.enable_learning,
             },
         }
 
@@ -360,6 +416,18 @@ validation:
   min_r_squared: 0.5      # Min acceptable R² - FR001
   max_annual_decline: 1.0 # Max annual decline rate - FR005
   strict_mode: false      # Treat warnings as errors
+
+# Refinement settings (fit quality analysis - all disabled by default)
+refinement:
+  enable_logging: false           # Log fit metadata to storage
+  log_storage: sqlite             # Storage type: sqlite or csv
+  log_path: null                  # null = ~/.pyforecast/fit_logs.db
+  enable_hindcast: false          # Run hindcast validation
+  hindcast_holdout_months: 6      # Months to hold out for validation
+  min_training_months: 12         # Minimum training data required
+  enable_residual_analysis: false # Compute residual diagnostics
+  known_events_file: null         # CSV with known regime events
+  enable_learning: false          # Enable parameter learning
 """
 
     with open(filepath, "w") as f:

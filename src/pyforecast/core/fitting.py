@@ -190,7 +190,8 @@ class DeclineFitter:
         t: np.ndarray,
         q: np.ndarray,
         apply_regime_detection: bool = True,
-        apply_weights: bool = True
+        apply_weights: bool = True,
+        capture_residuals: bool = False,
     ) -> ForecastResult:
         """Fit hyperbolic decline model to production data.
 
@@ -199,6 +200,8 @@ class DeclineFitter:
             q: Production rate array
             apply_regime_detection: Whether to detect and use only current regime
             apply_weights: Whether to apply exponential decay weighting
+            capture_residuals: Whether to capture residuals in the result
+                (for residual analysis). Adds t_fit and residuals to result.
 
         Returns:
             ForecastResult with fitted model and quality metrics
@@ -293,6 +296,13 @@ class DeclineFitter:
         q_pred = model.rate(t_fit)
         metrics = self._calculate_metrics(q_fit, q_pred, n_params=3)
 
+        # Capture residuals if requested
+        t_fit_out = None
+        residuals_out = None
+        if capture_residuals:
+            t_fit_out = t_fit.copy()
+            residuals_out = q_fit - q_pred
+
         return ForecastResult(
             model=model,
             r_squared=metrics['r_squared'],
@@ -300,7 +310,9 @@ class DeclineFitter:
             aic=metrics['aic'],
             bic=metrics['bic'],
             regime_start_idx=regime_start,
-            data_points_used=len(q_fit)
+            data_points_used=len(q_fit),
+            t_fit=t_fit_out,
+            residuals=residuals_out,
         )
 
     def _calculate_metrics(

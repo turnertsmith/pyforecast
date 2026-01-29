@@ -178,6 +178,8 @@ class ForecastResult:
         bic: Bayesian Information Criterion
         regime_start_idx: Index where current regime starts (after detected changes)
         data_points_used: Number of production points used in fit
+        t_fit: Optional time array used for fitting (for residual analysis)
+        residuals: Optional residuals array (actual - predicted)
     """
     model: HyperbolicModel
     r_squared: float
@@ -186,6 +188,8 @@ class ForecastResult:
     bic: float
     regime_start_idx: int
     data_points_used: int
+    t_fit: np.ndarray | None = None
+    residuals: np.ndarray | None = None
 
     @property
     def is_acceptable(self) -> bool:

@@ -26,7 +26,7 @@ from ..validation import (
 )
 
 if TYPE_CHECKING:
-    from ..config import PyForecastConfig, ValidationConfig
+    from ..config import PyForecastConfig, ValidationConfig, RefinementConfig
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,38 @@ class BatchConfig:
 
 
 @dataclass
+class RefinementResults:
+    """Results from refinement analysis.
+
+    Attributes:
+        hindcast_results: Dict of (well_id, product) -> HindcastResult
+        residual_diagnostics: Dict of (well_id, product) -> ResidualDiagnostics
+        fit_logs_count: Number of fit logs recorded
+    """
+    hindcast_results: dict = field(default_factory=dict)
+    residual_diagnostics: dict = field(default_factory=dict)
+    fit_logs_count: int = 0
+
+    def get_hindcast_summary(self) -> dict:
+        """Get summary of hindcast results."""
+        if not self.hindcast_results:
+            return {"count": 0}
+
+        import numpy as np
+        mapes = [r.mape for r in self.hindcast_results.values()]
+        correlations = [r.correlation for r in self.hindcast_results.values()]
+        good_count = sum(1 for r in self.hindcast_results.values() if r.is_good_hindcast)
+
+        return {
+            "count": len(mapes),
+            "avg_mape": float(np.mean(mapes)),
+            "median_mape": float(np.median(mapes)),
+            "avg_correlation": float(np.mean(correlations)),
+            "good_hindcast_pct": good_count / len(mapes) * 100 if mapes else 0,
+        }
+
+
+@dataclass
 class BatchResult:
     """Results from batch processing.
 
@@ -84,6 +116,7 @@ class BatchResult:
         skipped: Count of wells skipped (insufficient data)
         errors: List of (well_id, error_message) tuples
         validation_results: Dict of well_id -> ValidationResult
+        refinement_results: Optional refinement analysis results
     """
     wells: list[Well]
     successful: int
@@ -91,6 +124,7 @@ class BatchResult:
     skipped: int
     errors: list[tuple[str, str]]
     validation_results: dict[str, ValidationResult] = field(default_factory=dict)
+    refinement_results: RefinementResults | None = None
 
     def get_validation_summary(self) -> dict:
         """Get summary of validation results.
@@ -123,12 +157,41 @@ class BatchResult:
         return summary
 
 
+@dataclass
+class RefinementOptions:
+    """Options for refinement in single-well fitting.
+
+    Attributes:
+        enable_hindcast: Run hindcast validation
+        enable_residuals: Capture residuals for analysis
+        hindcast_holdout_months: Months to hold out for hindcast
+        min_training_months: Minimum training months for hindcast
+    """
+    enable_hindcast: bool = False
+    enable_residuals: bool = False
+    hindcast_holdout_months: int = 6
+    min_training_months: int = 12
+
+
+@dataclass
+class SingleWellRefinementResult:
+    """Refinement results for a single well.
+
+    Attributes:
+        hindcast_results: Dict of product -> HindcastResult
+        residual_diagnostics: Dict of product -> ResidualDiagnostics
+    """
+    hindcast_results: dict = field(default_factory=dict)
+    residual_diagnostics: dict = field(default_factory=dict)
+
+
 def _fit_single_well(
     well: Well,
     products: list[str],
     product_configs: dict[str, FittingConfig],
     validation_config: "ValidationConfig | None" = None,
-) -> tuple[Well, list[str], ValidationResult]:
+    refinement_options: RefinementOptions | None = None,
+) -> tuple[Well, list[str], ValidationResult, SingleWellRefinementResult | None]:
     """Fit decline curves for a single well (worker function).
 
     Args:
@@ -136,12 +199,30 @@ def _fit_single_well(
         products: Products to fit
         product_configs: Dict of product -> FittingConfig
         validation_config: Optional validation configuration
+        refinement_options: Optional refinement options
 
     Returns:
-        Tuple of (well with forecasts, list of error messages, validation result)
+        Tuple of (well with forecasts, list of error messages, validation result, refinement result)
     """
     errors = []
     validation_result = ValidationResult(well_id=well.well_id)
+    refinement_result = None
+
+    # Initialize refinement components if enabled
+    hindcast_validator = None
+    residual_analyzer = None
+    if refinement_options is not None:
+        if refinement_options.enable_hindcast:
+            from ..refinement.hindcast import HindcastValidator
+            hindcast_validator = HindcastValidator(
+                holdout_months=refinement_options.hindcast_holdout_months,
+                min_training_months=refinement_options.min_training_months,
+            )
+        if refinement_options.enable_residuals:
+            from ..refinement.residual_analysis import ResidualAnalyzer
+            residual_analyzer = ResidualAnalyzer()
+
+        refinement_result = SingleWellRefinementResult()
 
     # Create validators if config provided
     if validation_config is not None:
@@ -200,7 +281,11 @@ def _fit_single_well(
                     fitting_validators[product].validate_pre_fit(well, product)
                 )
 
-            result = fitter.fit(t, q)
+            # Determine if we need residuals
+            capture_residuals = residual_analyzer is not None
+
+            # Fit the decline curve
+            result = fitter.fit(t, q, capture_residuals=capture_residuals)
             well.set_forecast(product, result)
 
             # Run post-fit validation
@@ -211,12 +296,26 @@ def _fit_single_well(
                     )
                 )
 
+            # Run hindcast validation if enabled
+            if hindcast_validator is not None and refinement_result is not None:
+                hindcast = hindcast_validator.validate(well, product, fitter)
+                if hindcast is not None:
+                    refinement_result.hindcast_results[product] = hindcast
+
+            # Run residual analysis if enabled
+            if residual_analyzer is not None and refinement_result is not None:
+                diagnostics, residual_validation = residual_analyzer.analyze_and_validate(
+                    t, q, result, well.well_id, product
+                )
+                refinement_result.residual_diagnostics[product] = diagnostics
+                validation_result = validation_result.merge(residual_validation)
+
         except ValueError as e:
             errors.append(f"{product}: {str(e)}")
         except Exception as e:
             errors.append(f"{product}: Unexpected error - {str(e)}")
 
-    return well, errors, validation_result
+    return well, errors, validation_result, refinement_result
 
 
 class BatchProcessor:
@@ -309,11 +408,26 @@ class BatchProcessor:
         if self.config.pyforecast_config is not None:
             validation_config = self.config.pyforecast_config.validation
 
+        # Get refinement options if enabled
+        refinement_options = None
+        refinement_enabled = False
+        if self.config.pyforecast_config is not None:
+            ref_config = self.config.pyforecast_config.refinement
+            if ref_config.enable_hindcast or ref_config.enable_residual_analysis:
+                refinement_enabled = True
+                refinement_options = RefinementOptions(
+                    enable_hindcast=ref_config.enable_hindcast,
+                    enable_residuals=ref_config.enable_residual_analysis,
+                    hindcast_holdout_months=ref_config.hindcast_holdout_months,
+                    min_training_months=ref_config.min_training_months,
+                )
+
         successful = 0
         failed = 0
         all_errors = []
         processed_wells = []
         all_validation_results = {}
+        all_refinement_results = RefinementResults() if refinement_enabled else None
 
         # Process in parallel
         workers = self.config.workers
@@ -329,6 +443,7 @@ class BatchProcessor:
                     self.config.products,
                     product_configs,
                     validation_config,
+                    refinement_options,
                 ): well.well_id
                 for well in filtered_wells
             }
@@ -344,9 +459,16 @@ class BatchProcessor:
             for future in iterator:
                 well_id = futures[future]
                 try:
-                    well, errors, validation_result = future.result()
+                    well, errors, validation_result, refinement_result = future.result()
                     processed_wells.append(well)
                     all_validation_results[well_id] = validation_result
+
+                    # Collect refinement results
+                    if refinement_result is not None and all_refinement_results is not None:
+                        for product, hindcast in refinement_result.hindcast_results.items():
+                            all_refinement_results.hindcast_results[(well_id, product)] = hindcast
+                        for product, diagnostics in refinement_result.residual_diagnostics.items():
+                            all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
 
                     if errors:
                         all_errors.extend((well_id, e) for e in errors)
@@ -373,6 +495,7 @@ class BatchProcessor:
             skipped=skipped,
             errors=all_errors,
             validation_results=all_validation_results,
+            refinement_results=all_refinement_results,
         )
 
     def run(
@@ -488,6 +611,10 @@ class BatchProcessor:
         if result.validation_results:
             self._save_validation_report(result, output_dir)
 
+        # Save refinement report if enabled
+        if result.refinement_results is not None:
+            self._save_refinement_report(result.refinement_results, output_dir)
+
     def _save_validation_report(
         self,
         result: BatchResult,
@@ -530,3 +657,66 @@ class BatchProcessor:
                         f.write(f"    Guidance: {issue.guidance}\n")
 
         logger.info(f"Saved validation report to {report_path}")
+
+    def _save_refinement_report(
+        self,
+        refinement_results: RefinementResults,
+        output_dir: Path,
+    ) -> None:
+        """Save refinement analysis report to file.
+
+        Args:
+            refinement_results: Refinement results
+            output_dir: Output directory
+        """
+        report_path = output_dir / "refinement_report.txt"
+
+        with open(report_path, "w") as f:
+            f.write("PyForecast Refinement Analysis Report\n")
+            f.write("=" * 40 + "\n\n")
+
+            # Hindcast summary
+            if refinement_results.hindcast_results:
+                f.write("Hindcast Validation Summary:\n")
+                summary = refinement_results.get_hindcast_summary()
+                f.write(f"  Wells with hindcast: {summary['count']}\n")
+                f.write(f"  Average MAPE: {summary['avg_mape']:.1f}%\n")
+                f.write(f"  Median MAPE: {summary['median_mape']:.1f}%\n")
+                f.write(f"  Average correlation: {summary['avg_correlation']:.3f}\n")
+                f.write(f"  Good hindcast rate: {summary['good_hindcast_pct']:.1f}%\n")
+                f.write("\n")
+
+                # Detailed hindcast results
+                f.write("Hindcast Details:\n")
+                f.write("-" * 40 + "\n")
+                for (well_id, product), hindcast in sorted(refinement_results.hindcast_results.items()):
+                    status = "GOOD" if hindcast.is_good_hindcast else "POOR"
+                    f.write(
+                        f"  {well_id}/{product}: MAPE={hindcast.mape:.1f}%, "
+                        f"corr={hindcast.correlation:.3f}, bias={hindcast.bias:.1%} [{status}]\n"
+                    )
+                f.write("\n")
+
+            # Residual diagnostics summary
+            if refinement_results.residual_diagnostics:
+                f.write("Residual Analysis Summary:\n")
+                systematic_count = sum(
+                    1 for d in refinement_results.residual_diagnostics.values()
+                    if d.has_systematic_pattern
+                )
+                total = len(refinement_results.residual_diagnostics)
+                f.write(f"  Total analyzed: {total}\n")
+                f.write(f"  With systematic patterns: {systematic_count} ({systematic_count/total*100:.1f}%)\n")
+                f.write("\n")
+
+                # Flag wells with systematic patterns
+                f.write("Wells with systematic residual patterns:\n")
+                f.write("-" * 40 + "\n")
+                for (well_id, product), diag in sorted(refinement_results.residual_diagnostics.items()):
+                    if diag.has_systematic_pattern:
+                        f.write(
+                            f"  {well_id}/{product}: DW={diag.durbin_watson:.2f}, "
+                            f"early_bias={diag.early_bias:.1%}, late_bias={diag.late_bias:.1%}\n"
+                        )
+
+        logger.info(f"Saved refinement report to {report_path}")

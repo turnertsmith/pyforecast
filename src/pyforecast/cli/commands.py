@@ -73,6 +73,27 @@ def process(
             help="Export format: ac_forecast, ac_economic, or json (overrides config)",
         )
     ] = None,
+    hindcast: Annotated[
+        bool,
+        typer.Option(
+            "--hindcast",
+            help="Run hindcast validation to measure forecast accuracy",
+        )
+    ] = False,
+    log_fits: Annotated[
+        bool,
+        typer.Option(
+            "--log-fits",
+            help="Log fit metadata to persistent storage for analysis",
+        )
+    ] = False,
+    residuals: Annotated[
+        bool,
+        typer.Option(
+            "--residuals",
+            help="Compute residual diagnostics for fit quality analysis",
+        )
+    ] = False,
 ) -> None:
     """Process production data and generate decline forecasts.
 
@@ -116,6 +137,14 @@ def process(
             raise typer.Exit(1)
         pf_config.output.format = export_format  # type: ignore
 
+    # Refinement flags override config
+    if hindcast:
+        pf_config.refinement.enable_hindcast = True
+    if residuals:
+        pf_config.refinement.enable_residual_analysis = True
+    if log_fits:
+        pf_config.refinement.enable_logging = True
+
     # Create batch config with per-product fitting configs
     batch_config = BatchConfig(
         products=pf_config.output.products,
@@ -134,6 +163,43 @@ def process(
     typer.echo(f"Products: {', '.join(pf_config.output.products)}")
     processor = BatchProcessor(batch_config)
     result = processor.run(input_files, output)
+
+    # Log fits if enabled
+    if log_fits and result.wells:
+        from ..refinement.fit_logger import FitLogger
+
+        typer.echo("Logging fit results...")
+        with FitLogger() as fit_logger:
+            for well in result.wells:
+                for prod in pf_config.output.products:
+                    forecast = well.get_forecast(prod)
+                    if forecast is not None:
+                        fitting_config = batch_config.get_fitting_config(prod)
+
+                        # Get hindcast result if available
+                        hindcast_result = None
+                        if result.refinement_results and result.refinement_results.hindcast_results:
+                            hindcast_result = result.refinement_results.hindcast_results.get(
+                                (well.well_id, prod)
+                            )
+
+                        # Get residual diagnostics if available
+                        residual_diag = None
+                        if result.refinement_results and result.refinement_results.residual_diagnostics:
+                            residual_diag = result.refinement_results.residual_diagnostics.get(
+                                (well.well_id, prod)
+                            )
+
+                        fit_logger.log(
+                            forecast,
+                            well,
+                            prod,
+                            fitting_config,
+                            hindcast=hindcast_result,
+                            residuals=residual_diag,
+                        )
+
+        typer.echo(f"  Logged {fit_logger.storage.count()} fits to storage")
 
     # Report results
     typer.echo("")
@@ -161,6 +227,29 @@ def process(
 
         if summary['wells_with_errors'] > 0 or summary['wells_with_warnings'] > 0:
             typer.echo(f"\n  See {output}/validation_report.txt for details")
+
+    # Report refinement summary
+    if result.refinement_results is not None:
+        ref_results = result.refinement_results
+        typer.echo("")
+        typer.echo("Refinement Analysis:")
+
+        if ref_results.hindcast_results:
+            hindcast_summary = ref_results.get_hindcast_summary()
+            typer.echo(f"  Hindcast validation: {hindcast_summary['count']} wells")
+            typer.echo(f"    Average MAPE: {hindcast_summary['avg_mape']:.1f}%")
+            typer.echo(f"    Good hindcast rate: {hindcast_summary['good_hindcast_pct']:.1f}%")
+
+        if ref_results.residual_diagnostics:
+            systematic = sum(
+                1 for d in ref_results.residual_diagnostics.values()
+                if d.has_systematic_pattern
+            )
+            total = len(ref_results.residual_diagnostics)
+            typer.echo(f"  Residual analysis: {total} fits analyzed")
+            typer.echo(f"    With systematic patterns: {systematic} ({systematic/total*100:.1f}%)")
+
+        typer.echo(f"\n  See {output}/refinement_report.txt for details")
 
     typer.echo(f"\nOutput saved to: {output}/")
 
@@ -519,6 +608,354 @@ def info(
     except ValueError as e:
         typer.echo(f"Format detection failed: {e}", err=True)
         raise typer.Exit(1)
+
+
+@app.command("analyze-fits")
+def analyze_fits(
+    storage_path: Annotated[
+        Optional[Path],
+        typer.Argument(
+            help="Path to fit logs database (default: ~/.pyforecast/fit_logs.db)",
+        )
+    ] = None,
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-o", "--output",
+            help="Output CSV file for analysis report",
+        )
+    ] = None,
+    basin: Annotated[
+        Optional[str],
+        typer.Option(
+            "--basin",
+            help="Filter by basin name",
+        )
+    ] = None,
+    formation: Annotated[
+        Optional[str],
+        typer.Option(
+            "--formation",
+            help="Filter by formation name",
+        )
+    ] = None,
+    product: Annotated[
+        Optional[str],
+        typer.Option(
+            "-p", "--product",
+            help="Filter by product (oil, gas, water)",
+        )
+    ] = None,
+) -> None:
+    """Analyze accumulated fit logs from previous runs.
+
+    Reads fit log database and generates summary statistics, parameter
+    distributions, and hindcast performance analysis.
+
+    Example:
+        pyforecast analyze-fits --basin "Permian" -o analysis.csv
+    """
+    from ..refinement.fit_logger import FitLogAnalyzer
+    from ..refinement.storage import get_default_storage_path
+
+    # Use default storage if not specified
+    db_path = storage_path or get_default_storage_path()
+
+    if not db_path.exists():
+        typer.echo(f"Error: No fit logs found at {db_path}", err=True)
+        typer.echo("Run 'pyforecast process --log-fits' to create fit logs.")
+        raise typer.Exit(1)
+
+    typer.echo(f"Analyzing fit logs from {db_path}")
+
+    analyzer = FitLogAnalyzer(db_path)
+
+    # Get summary statistics
+    summary = analyzer.get_summary(basin=basin, formation=formation, product=product)
+
+    if summary.get("count", 0) == 0:
+        typer.echo("No matching fit logs found.")
+        raise typer.Exit(0)
+
+    typer.echo("")
+    typer.echo("Fit Log Summary:")
+    typer.echo(f"  Total fits: {summary.get('count', 0)}")
+    if summary.get('avg_r_squared'):
+        typer.echo(f"  Average R²: {summary['avg_r_squared']:.3f}")
+    if summary.get('avg_rmse'):
+        typer.echo(f"  Average RMSE: {summary['avg_rmse']:.2f}")
+
+    # Get hindcast performance
+    hindcast = analyzer.get_hindcast_performance(basin=basin, formation=formation, product=product)
+    if hindcast.get("count", 0) > 0:
+        typer.echo("")
+        typer.echo("Hindcast Performance:")
+        typer.echo(f"  Fits with hindcast: {hindcast['count']}")
+        typer.echo(f"  Average MAPE: {hindcast['avg_mape']:.1f}%")
+        typer.echo(f"  Good hindcast rate: {hindcast['good_hindcast_pct']:.1f}%")
+
+    # Get parameter distribution
+    params = analyzer.get_parameter_distribution(basin=basin, formation=formation, product=product)
+    if "b" in params:
+        typer.echo("")
+        typer.echo("B-Factor Distribution:")
+        typer.echo(f"  Mean: {params['b']['mean']:.3f}")
+        typer.echo(f"  Std: {params['b']['std']:.3f}")
+        typer.echo(f"  Range: [{params['b']['min']:.3f}, {params['b']['max']:.3f}]")
+
+    # Export to CSV if requested
+    if output:
+        analyzer.export_report(output, basin=basin, formation=formation, product=product)
+        typer.echo(f"\nAnalysis report saved to: {output}")
+
+
+@app.command("suggest-params")
+def suggest_params(
+    storage_path: Annotated[
+        Optional[Path],
+        typer.Argument(
+            help="Path to fit logs database (default: ~/.pyforecast/fit_logs.db)",
+        )
+    ] = None,
+    basin: Annotated[
+        Optional[str],
+        typer.Option(
+            "--basin",
+            help="Get suggestion for specific basin",
+        )
+    ] = None,
+    formation: Annotated[
+        Optional[str],
+        typer.Option(
+            "--formation",
+            help="Get suggestion for specific formation",
+        )
+    ] = None,
+    product: Annotated[
+        str,
+        typer.Option(
+            "-p", "--product",
+            help="Product to get suggestions for",
+        )
+    ] = "oil",
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-o", "--output",
+            help="Export all suggestions to CSV",
+        )
+    ] = None,
+    update: Annotated[
+        bool,
+        typer.Option(
+            "--update",
+            help="Recompute all suggestions from current fit logs",
+        )
+    ] = False,
+) -> None:
+    """Get parameter suggestions learned from historical fits.
+
+    Analyzes accumulated fit logs to suggest optimal fitting parameters
+    (recency_half_life, regime_threshold, etc.) based on hindcast performance.
+
+    Example:
+        pyforecast suggest-params --basin "Permian" -p oil
+    """
+    from ..refinement.parameter_learning import ParameterLearner
+    from ..refinement.storage import get_default_storage_path
+
+    # Use default storage if not specified
+    db_path = storage_path or get_default_storage_path()
+
+    if not db_path.exists():
+        typer.echo(f"Error: No fit logs found at {db_path}", err=True)
+        typer.echo("Run 'pyforecast process --log-fits --hindcast' to create fit logs with hindcast data.")
+        raise typer.Exit(1)
+
+    learner = ParameterLearner(db_path)
+
+    # Update suggestions if requested
+    if update:
+        typer.echo("Updating parameter suggestions from fit logs...")
+        count = learner.update_suggestions(product=product)
+        typer.echo(f"Updated {count} suggestions")
+        typer.echo("")
+
+    # Export all suggestions if requested
+    if output:
+        count = learner.export_suggestions(output)
+        typer.echo(f"Exported {count} suggestions to {output}")
+        return
+
+    # Get specific suggestion
+    suggestion = learner.suggest(product=product, basin=basin, formation=formation)
+
+    if suggestion is None:
+        typer.echo("No parameter suggestions available.")
+        typer.echo("Need at least 10 fits with hindcast data to generate suggestions.")
+        typer.echo("Run 'pyforecast process --log-fits --hindcast' on more wells.")
+        raise typer.Exit(0)
+
+    typer.echo(f"Parameter Suggestion for {suggestion.grouping}/{product}")
+    typer.echo(f"  Based on {suggestion.sample_count} fits (confidence: {suggestion.confidence})")
+    typer.echo("")
+    typer.echo("Suggested values:")
+    typer.echo(f"  recency_half_life: {suggestion.suggested_recency_half_life:.1f}")
+    typer.echo(f"  regime_threshold: {suggestion.suggested_regime_threshold:.2f}")
+    typer.echo(f"  regime_window: {suggestion.suggested_regime_window}")
+    typer.echo(f"  regime_sustained_months: {suggestion.suggested_regime_sustained_months}")
+    typer.echo("")
+    typer.echo("Historical performance with these parameters:")
+    typer.echo(f"  Average R²: {suggestion.avg_r_squared:.3f}")
+    if suggestion.avg_hindcast_mape:
+        typer.echo(f"  Average hindcast MAPE: {suggestion.avg_hindcast_mape:.1f}%")
+
+
+@app.command("calibrate-regime")
+def calibrate_regime(
+    input_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Input CSV/Excel file with production data",
+            exists=True,
+        )
+    ],
+    events_file: Annotated[
+        Path,
+        typer.Option(
+            "--events",
+            help="CSV file with known events (well_id, event_date, event_type)",
+            exists=True,
+        )
+    ],
+    output: Annotated[
+        Optional[Path],
+        typer.Option(
+            "-o", "--output",
+            help="Output JSON file for calibration results",
+        )
+    ] = None,
+    product: Annotated[
+        str,
+        typer.Option(
+            "-p", "--product",
+            help="Product to calibrate",
+        )
+    ] = "oil",
+) -> None:
+    """Calibrate regime detection from known refrac/workover events.
+
+    Reads a CSV of known events (refracs, workovers) and evaluates
+    different regime detection thresholds to find optimal settings.
+
+    Events CSV format:
+        well_id,event_date,event_type
+        42-001-00001,2022-06-15,refrac
+        42-001-00002,2023-01-20,workover
+
+    Example:
+        pyforecast calibrate-regime data.csv --events known_events.csv -o calibration.json
+    """
+    import json
+    import csv
+    from datetime import datetime
+
+    from ..data.base import load_wells
+    from ..core.fitting import DeclineFitter, FittingConfig
+
+    typer.echo(f"Loading production data from {input_file}...")
+    wells = load_wells(input_file)
+    wells_by_id = {w.well_id: w for w in wells}
+
+    typer.echo(f"Loading known events from {events_file}...")
+    events = []
+    with open(events_file, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            events.append({
+                "well_id": row["well_id"],
+                "event_date": row["event_date"],
+                "event_type": row.get("event_type", "regime_change"),
+            })
+
+    typer.echo(f"Found {len(events)} known events")
+
+    # Test different threshold values
+    thresholds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    results = []
+
+    typer.echo("")
+    typer.echo("Testing regime detection thresholds...")
+
+    for threshold in thresholds:
+        config = FittingConfig(regime_threshold=threshold)
+        fitter = DeclineFitter(config)
+
+        true_positives = 0
+        false_negatives = 0
+        total_events = 0
+
+        for event in events:
+            well_id = event["well_id"]
+            if well_id not in wells_by_id:
+                continue
+
+            well = wells_by_id[well_id]
+            t = well.production.time_months
+            q = well.production.get_product_daily(product)
+
+            if len(q) < 12 or q.max() < 0.1:
+                continue
+
+            total_events += 1
+
+            # Find event month index
+            event_date = datetime.strptime(event["event_date"], "%Y-%m-%d")
+            dates = well.production.dates
+            event_idx = None
+            for i, d in enumerate(dates):
+                if d.year == event_date.year and d.month == event_date.month:
+                    event_idx = i
+                    break
+
+            if event_idx is None:
+                continue
+
+            # Check if regime detection finds it
+            regime_start = fitter.detect_regime_change(q)
+
+            # Consider it detected if within 3 months of actual event
+            if abs(regime_start - event_idx) <= 3:
+                true_positives += 1
+            else:
+                false_negatives += 1
+
+        detection_rate = true_positives / total_events * 100 if total_events > 0 else 0
+        results.append({
+            "threshold": threshold,
+            "total_events": total_events,
+            "true_positives": true_positives,
+            "false_negatives": false_negatives,
+            "detection_rate": detection_rate,
+        })
+
+        typer.echo(f"  threshold={threshold:.2f}: {detection_rate:.1f}% detection rate "
+                   f"({true_positives}/{total_events})")
+
+    # Find best threshold
+    best = max(results, key=lambda r: r["detection_rate"])
+    typer.echo("")
+    typer.echo(f"Recommended threshold: {best['threshold']:.2f} "
+               f"({best['detection_rate']:.1f}% detection rate)")
+
+    # Save results
+    if output:
+        with open(output, "w") as f:
+            json.dump({
+                "recommended_threshold": best["threshold"],
+                "results": results,
+            }, f, indent=2)
+        typer.echo(f"\nCalibration results saved to: {output}")
 
 
 if __name__ == "__main__":
