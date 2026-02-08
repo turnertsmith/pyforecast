@@ -456,6 +456,106 @@ class BatchProcessor:
 
         return valid, skipped
 
+    def _build_processing_context(self) -> tuple[
+        dict[str, FittingConfig],
+        "ValidationConfig | None",
+        RefinementOptions | None,
+        bool,
+    ]:
+        """Build shared processing context from config.
+
+        Returns:
+            Tuple of (product_configs, validation_config, refinement_options, refinement_enabled)
+        """
+        product_configs = {
+            product: self.config.get_fitting_config(product)
+            for product in self.config.products
+        }
+
+        validation_config = None
+        if self.config.pyforecast_config is not None:
+            validation_config = self.config.pyforecast_config.validation
+
+        refinement_options = None
+        refinement_enabled = False
+        if self.config.pyforecast_config is not None:
+            ref_config = self.config.pyforecast_config.refinement
+            if ref_config.enable_hindcast or ref_config.enable_residual_analysis:
+                refinement_enabled = True
+                refinement_options = RefinementOptions(
+                    enable_hindcast=ref_config.enable_hindcast,
+                    enable_residuals=ref_config.enable_residual_analysis,
+                    hindcast_holdout_months=ref_config.hindcast_holdout_months,
+                    min_training_months=ref_config.min_training_months,
+                )
+
+        return product_configs, validation_config, refinement_options, refinement_enabled
+
+    def _resolve_workers(self, n_wells: int) -> int:
+        """Resolve number of parallel workers.
+
+        Args:
+            n_wells: Number of wells to process
+
+        Returns:
+            Number of workers to use
+        """
+        if self.config.workers is not None:
+            return self.config.workers
+        import os
+        return min(os.cpu_count() or 4, n_wells)
+
+    def _submit_wells(
+        self,
+        executor: ProcessPoolExecutor,
+        wells: list[Well],
+        product_configs: dict[str, FittingConfig],
+        validation_config,
+        refinement_options: RefinementOptions | None,
+    ) -> dict:
+        """Submit wells to executor for parallel processing.
+
+        Args:
+            executor: ProcessPoolExecutor instance
+            wells: Wells to process
+            product_configs: Per-product fitting configs
+            validation_config: Validation configuration
+            refinement_options: Refinement options
+
+        Returns:
+            Dict mapping futures to well IDs
+        """
+        return {
+            executor.submit(
+                _fit_single_well,
+                well,
+                self.config.products,
+                product_configs,
+                validation_config,
+                refinement_options,
+            ): well.well_id
+            for well in wells
+        }
+
+    @staticmethod
+    def _collect_refinement(
+        refinement_result: SingleWellRefinementResult | None,
+        all_refinement_results: RefinementResults | None,
+        well_id: str,
+    ) -> None:
+        """Collect refinement results from a single well into the batch results.
+
+        Args:
+            refinement_result: Single well refinement result
+            all_refinement_results: Batch-level refinement results accumulator
+            well_id: Well identifier
+        """
+        if refinement_result is not None and all_refinement_results is not None:
+            for product, hindcast in refinement_result.hindcast_results.items():
+                all_refinement_results.hindcast_results[(well_id, product)] = hindcast
+            for product, diagnostics in refinement_result.residual_diagnostics.items():
+                all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
+
     def process(
         self,
         wells: list[Well],
@@ -470,7 +570,6 @@ class BatchProcessor:
         Returns:
             BatchResult with processed wells and statistics
         """
-        # Filter wells
         filtered_wells, skipped = self.filter_wells(wells)
 
         if not filtered_wells:
@@ -482,30 +581,9 @@ class BatchProcessor:
                 errors=[]
             )
 
-        # Build per-product configs
-        product_configs = {
-            product: self.config.get_fitting_config(product)
-            for product in self.config.products
-        }
-
-        # Get validation config if available
-        validation_config = None
-        if self.config.pyforecast_config is not None:
-            validation_config = self.config.pyforecast_config.validation
-
-        # Get refinement options if enabled
-        refinement_options = None
-        refinement_enabled = False
-        if self.config.pyforecast_config is not None:
-            ref_config = self.config.pyforecast_config.refinement
-            if ref_config.enable_hindcast or ref_config.enable_residual_analysis:
-                refinement_enabled = True
-                refinement_options = RefinementOptions(
-                    enable_hindcast=ref_config.enable_hindcast,
-                    enable_residuals=ref_config.enable_residual_analysis,
-                    hindcast_holdout_months=ref_config.hindcast_holdout_months,
-                    min_training_months=ref_config.min_training_months,
-                )
+        product_configs, validation_config, refinement_options, refinement_enabled = (
+            self._build_processing_context()
+        )
 
         successful = 0
         failed = 0
@@ -514,24 +592,13 @@ class BatchProcessor:
         all_validation_results = {}
         all_refinement_results = RefinementResults() if refinement_enabled else None
 
-        # Process in parallel
-        workers = self.config.workers
-        if workers is None:
-            import os
-            workers = min(os.cpu_count() or 4, len(filtered_wells))
+        workers = self._resolve_workers(len(filtered_wells))
 
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    _fit_single_well,
-                    well,
-                    self.config.products,
-                    product_configs,
-                    validation_config,
-                    refinement_options,
-                ): well.well_id
-                for well in filtered_wells
-            }
+            futures = self._submit_wells(
+                executor, filtered_wells, product_configs,
+                validation_config, refinement_options,
+            )
 
             iterator = as_completed(futures)
             if show_progress:
@@ -547,13 +614,7 @@ class BatchProcessor:
                     well, errors, validation_result, refinement_result = future.result()
                     processed_wells.append(well)
                     all_validation_results[well_id] = validation_result
-
-                    # Collect refinement results
-                    if refinement_result is not None and all_refinement_results is not None:
-                        for product, hindcast in refinement_result.hindcast_results.items():
-                            all_refinement_results.hindcast_results[(well_id, product)] = hindcast
-                        for product, diagnostics in refinement_result.residual_diagnostics.items():
-                            all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
+                    self._collect_refinement(refinement_result, all_refinement_results, well_id)
 
                     if errors:
                         all_errors.extend((well_id, e) for e in errors)
@@ -620,20 +681,17 @@ class BatchProcessor:
 
         # Filter wells - skip already processed and insufficient data
         remaining_wells = []
-        skipped_this_run = 0
         for well in wells:
             if well.well_id in checkpoint.processed_well_ids:
                 continue
             if well.has_sufficient_data(self.config.min_points):
                 remaining_wells.append(well)
             else:
-                skipped_this_run += 1
                 checkpoint.skipped += 1
                 checkpoint.processed_well_ids.add(well.well_id)
                 logger.debug(f"Skipping {well.well_id}: insufficient data")
 
         if not remaining_wells:
-            # All wells already processed or skipped
             return BatchResult(
                 wells=[],
                 successful=checkpoint.successful,
@@ -642,55 +700,23 @@ class BatchProcessor:
                 errors=checkpoint.errors,
             )
 
-        # Build per-product configs
-        product_configs = {
-            product: self.config.get_fitting_config(product)
-            for product in self.config.products
-        }
-
-        # Get validation config if available
-        validation_config = None
-        if self.config.pyforecast_config is not None:
-            validation_config = self.config.pyforecast_config.validation
-
-        # Get refinement options if enabled
-        refinement_options = None
-        refinement_enabled = False
-        if self.config.pyforecast_config is not None:
-            ref_config = self.config.pyforecast_config.refinement
-            if ref_config.enable_hindcast or ref_config.enable_residual_analysis:
-                refinement_enabled = True
-                refinement_options = RefinementOptions(
-                    enable_hindcast=ref_config.enable_hindcast,
-                    enable_residuals=ref_config.enable_residual_analysis,
-                    hindcast_holdout_months=ref_config.hindcast_holdout_months,
-                    min_training_months=ref_config.min_training_months,
-                )
+        product_configs, validation_config, refinement_options, refinement_enabled = (
+            self._build_processing_context()
+        )
 
         processed_wells = []
         all_validation_results = {}
         all_refinement_results = RefinementResults() if refinement_enabled else None
         wells_since_checkpoint = 0
 
-        # Process in parallel
-        workers = self.config.workers
-        if workers is None:
-            import os
-            workers = min(os.cpu_count() or 4, len(remaining_wells))
+        workers = self._resolve_workers(len(remaining_wells))
 
         try:
             with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(
-                        _fit_single_well,
-                        well,
-                        self.config.products,
-                        product_configs,
-                        validation_config,
-                        refinement_options,
-                    ): well.well_id
-                    for well in remaining_wells
-                }
+                futures = self._submit_wells(
+                    executor, remaining_wells, product_configs,
+                    validation_config, refinement_options,
+                )
 
                 iterator = as_completed(futures)
                 if show_progress:
@@ -708,13 +734,7 @@ class BatchProcessor:
                         processed_wells.append(well)
                         all_validation_results[well_id] = validation_result
                         checkpoint.processed_well_ids.add(well_id)
-
-                        # Collect refinement results
-                        if refinement_result is not None and all_refinement_results is not None:
-                            for product, hindcast in refinement_result.hindcast_results.items():
-                                all_refinement_results.hindcast_results[(well_id, product)] = hindcast
-                            for product, diagnostics in refinement_result.residual_diagnostics.items():
-                                all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
+                        self._collect_refinement(refinement_result, all_refinement_results, well_id)
 
                         if errors:
                             checkpoint.errors.extend((well_id, e) for e in errors)
@@ -729,7 +749,6 @@ class BatchProcessor:
                         else:
                             checkpoint.successful += 1
 
-                        # Progress callback
                         if progress_callback:
                             progress_callback(
                                 len(checkpoint.processed_well_ids),
@@ -737,7 +756,6 @@ class BatchProcessor:
                                 well_id,
                             )
 
-                        # Periodic checkpoint save
                         wells_since_checkpoint += 1
                         if wells_since_checkpoint >= checkpoint_interval:
                             checkpoint.save(checkpoint_file)
@@ -748,8 +766,6 @@ class BatchProcessor:
                         checkpoint.errors.append((well_id, str(e)))
                         checkpoint.processed_well_ids.add(well_id)
                         logger.error(f"Failed to process {well_id}: {e}")
-
-                        # Save checkpoint on error
                         checkpoint.save(checkpoint_file)
 
         except KeyboardInterrupt:
@@ -797,6 +813,49 @@ class BatchProcessor:
 
         # Process wells
         result = self.process(wells, show_progress=show_progress)
+        logger.info(
+            f"Processing complete: {result.successful} successful, "
+            f"{result.failed} failed, {result.skipped} skipped"
+        )
+
+        if output_dir:
+            self._save_outputs(result, output_dir)
+
+        return result
+
+    def run_with_checkpoint(
+        self,
+        input_files: list[Path | str],
+        output_dir: Path | str | None = None,
+        checkpoint_file: Path | str = "checkpoint.json",
+        show_progress: bool = True,
+    ) -> BatchResult:
+        """Run batch processing with checkpoint/resume capability.
+
+        Args:
+            input_files: Input file paths
+            output_dir: Output directory (overrides config)
+            checkpoint_file: Path to checkpoint file (JSON)
+            show_progress: Whether to show progress bars
+
+        Returns:
+            BatchResult with processed wells
+        """
+        output_dir = Path(output_dir) if output_dir else self.config.output_dir
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load wells
+        logger.info(f"Loading wells from {len(input_files)} file(s)")
+        wells = self.load_files(input_files)
+        logger.info(f"Loaded {len(wells)} total wells")
+
+        # Process wells with checkpoint
+        result = self.process_with_checkpoint(
+            wells,
+            checkpoint_file=checkpoint_file,
+            show_progress=show_progress,
+        )
         logger.info(
             f"Processing complete: {result.successful} successful, "
             f"{result.failed} failed, {result.skipped} skipped"
@@ -855,49 +914,6 @@ class BatchProcessor:
         # Save refinement report if enabled
         if result.refinement_results is not None:
             self._save_refinement_report(result.refinement_results, output_dir)
-
-    def _save_validation_report(
-        self,
-        result: BatchResult,
-        output_dir: Path,
-    ) -> None:
-        """Save validation report to file.
-
-        Args:
-            result: Batch processing result
-            output_dir: Output directory
-        """
-        report_path = output_dir / "validation_report.txt"
-        summary = result.get_validation_summary()
-
-        with open(report_path, "w") as f:
-            f.write("PyForecast Validation Report\n")
-            f.write("=" * 40 + "\n\n")
-
-            f.write("Summary:\n")
-            f.write(f"  Wells with errors: {summary['wells_with_errors']}\n")
-            f.write(f"  Wells with warnings: {summary['wells_with_warnings']}\n")
-            f.write(f"  Total errors: {summary['total_errors']}\n")
-            f.write(f"  Total warnings: {summary['total_warnings']}\n\n")
-
-            if summary["by_category"]:
-                f.write("Issues by category:\n")
-                for cat, count in sorted(summary["by_category"].items()):
-                    f.write(f"  {cat}: {count}\n")
-                f.write("\n")
-
-            # Write detailed issues per well
-            f.write("Detailed Issues:\n")
-            f.write("-" * 40 + "\n")
-
-            for well_id, val_result in sorted(result.validation_results.items()):
-                if val_result.issues:
-                    f.write(f"\n{well_id}:\n")
-                    for issue in val_result.issues:
-                        f.write(f"  [{issue.code}] {issue.severity.name}: {issue.message}\n")
-                        f.write(f"    Guidance: {issue.guidance}\n")
-
-        logger.info(f"Saved validation report to {report_path}")
 
     def _save_refinement_report(
         self,

@@ -329,3 +329,161 @@ def summarize_residual_results(
         },
         "systematic_pattern_pct": systematic_count / len(diagnostics_list) * 100,
     }
+
+
+@dataclass
+class FittingAdjustment:
+    """A suggested adjustment to improve fitting.
+
+    Attributes:
+        parameter: Parameter to adjust (qi, di, b, dmin, model_type)
+        direction: Direction of adjustment (increase, decrease, or specific value)
+        confidence: Confidence in the suggestion (low, medium, high)
+        reason: Explanation of why this adjustment is suggested
+    """
+    parameter: str
+    direction: str
+    confidence: str
+    reason: str
+
+
+def suggest_fitting_adjustments(
+    diagnostics: ResidualDiagnostics,
+    result: "ForecastResult" = None,
+    bias_threshold: float = 0.15,
+    dw_low: float = 1.5,
+    dw_high: float = 2.5,
+) -> list[FittingAdjustment]:
+    """Suggest fitting adjustments based on residual diagnostics.
+
+    Analyzes residual patterns to provide actionable suggestions for
+    improving fit quality.
+
+    Args:
+        diagnostics: ResidualDiagnostics from a fit
+        result: Optional ForecastResult for additional context
+        bias_threshold: Threshold for flagging early/late bias
+        dw_low: Durbin-Watson lower threshold for positive autocorrelation
+        dw_high: Durbin-Watson upper threshold for negative autocorrelation
+
+    Returns:
+        List of FittingAdjustment suggestions
+    """
+    suggestions = []
+
+    # Check for early bias (model systematically over/under-predicts early time)
+    if diagnostics.early_bias > bias_threshold:
+        # Model under-predicts early (actual > predicted)
+        # Suggests qi is too low
+        suggestions.append(FittingAdjustment(
+            parameter="qi",
+            direction="increase",
+            confidence="medium",
+            reason=f"Early under-prediction ({diagnostics.early_bias:.1%}): "
+                   "Initial rate (qi) may be too low"
+        ))
+    elif diagnostics.early_bias < -bias_threshold:
+        # Model over-predicts early (actual < predicted)
+        # Suggests qi is too high or Di is too low
+        suggestions.append(FittingAdjustment(
+            parameter="qi",
+            direction="decrease",
+            confidence="medium",
+            reason=f"Early over-prediction ({diagnostics.early_bias:.1%}): "
+                   "Initial rate (qi) may be too high"
+        ))
+
+    # Check for late bias
+    if diagnostics.late_bias > bias_threshold:
+        # Model under-predicts late (actual > predicted)
+        # Suggests Dmin is too high or b is too low
+        suggestions.append(FittingAdjustment(
+            parameter="dmin",
+            direction="decrease",
+            confidence="medium",
+            reason=f"Late under-prediction ({diagnostics.late_bias:.1%}): "
+                   "Terminal decline (Dmin) may be too aggressive"
+        ))
+        suggestions.append(FittingAdjustment(
+            parameter="b",
+            direction="increase",
+            confidence="low",
+            reason=f"Late under-prediction ({diagnostics.late_bias:.1%}): "
+                   "b-factor may be too low, causing too-fast decline"
+        ))
+    elif diagnostics.late_bias < -bias_threshold:
+        # Model over-predicts late (actual < predicted)
+        # Suggests Dmin is too low or b is too high
+        suggestions.append(FittingAdjustment(
+            parameter="dmin",
+            direction="increase",
+            confidence="medium",
+            reason=f"Late over-prediction ({diagnostics.late_bias:.1%}): "
+                   "Terminal decline (Dmin) may be too conservative"
+        ))
+
+    # Check for positive autocorrelation (DW < lower threshold)
+    if diagnostics.durbin_watson < dw_low:
+        suggestions.append(FittingAdjustment(
+            parameter="model_type",
+            direction="try_alternative",
+            confidence="medium",
+            reason=f"Positive autocorrelation (DW={diagnostics.durbin_watson:.2f}): "
+                   "Model may be underfitting. Consider regime detection or different model type."
+        ))
+        # If we have model info, suggest specific adjustments
+        if result is not None and result.model.b < 0.3:
+            suggestions.append(FittingAdjustment(
+                parameter="b",
+                direction="increase",
+                confidence="medium",
+                reason="Near-exponential model with autocorrelation suggests "
+                       "hyperbolic behavior may be present"
+            ))
+
+    # Check for negative autocorrelation (DW > upper threshold)
+    if diagnostics.durbin_watson > dw_high:
+        suggestions.append(FittingAdjustment(
+            parameter="model_type",
+            direction="simplify",
+            confidence="low",
+            reason=f"Negative autocorrelation (DW={diagnostics.durbin_watson:.2f}): "
+                   "Model may be overfitting or data is noisy. Consider exponential model."
+        ))
+
+    # Check for combined early+late bias pattern
+    if (abs(diagnostics.early_bias) > bias_threshold and
+        abs(diagnostics.late_bias) > bias_threshold and
+        np.sign(diagnostics.early_bias) != np.sign(diagnostics.late_bias)):
+        # Opposite biases early vs late suggests b-factor issue
+        suggestions.append(FittingAdjustment(
+            parameter="b",
+            direction="adjust",
+            confidence="high",
+            reason="Opposite early/late bias pattern strongly suggests "
+                   "b-factor mismatch with actual decline curvature"
+        ))
+
+    return suggestions
+
+
+def format_adjustment_suggestions(
+    suggestions: list[FittingAdjustment],
+) -> str:
+    """Format adjustment suggestions as readable text.
+
+    Args:
+        suggestions: List of FittingAdjustment objects
+
+    Returns:
+        Formatted string with suggestions
+    """
+    if not suggestions:
+        return "No specific adjustments suggested. Fit appears reasonable."
+
+    lines = ["Suggested fitting adjustments:"]
+    for i, adj in enumerate(suggestions, 1):
+        lines.append(f"  {i}. [{adj.confidence.upper()}] {adj.parameter}: {adj.direction}")
+        lines.append(f"     Reason: {adj.reason}")
+
+    return "\n".join(lines)

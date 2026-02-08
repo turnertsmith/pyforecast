@@ -160,21 +160,24 @@ class HyperbolicModel:
         t = np.atleast_1d(np.asarray(t, dtype=float))
         cum = np.zeros_like(t)
 
-        for i, ti in enumerate(t):
-            if ti <= self.t_switch:
-                cum[i] = self._cumulative_hyperbolic(ti)
-            else:
-                # Cumulative through switch + exponential after
-                cum_switch = self._cumulative_hyperbolic(self.t_switch)
-                q_switch = self.rate(self.t_switch)[0]
-                t_after = ti - self.t_switch
-                cum_exp = (q_switch / self.dmin) * (1 - np.exp(-self.dmin * t_after))
-                cum[i] = cum_switch + cum_exp
+        # Before switch: hyperbolic cumulative
+        mask_hyp = t <= self.t_switch
+        if np.any(mask_hyp):
+            cum[mask_hyp] = self._cumulative_hyperbolic_vec(t[mask_hyp])
+
+        # After switch: hyperbolic cumulative through switch + exponential after
+        mask_exp = t > self.t_switch
+        if np.any(mask_exp):
+            cum_switch = self._cumulative_hyperbolic_vec(np.array([self.t_switch]))[0]
+            q_switch = self.rate(self.t_switch)[0]
+            t_after = t[mask_exp] - self.t_switch
+            cum_exp = (q_switch / self.dmin) * (1 - np.exp(-self.dmin * t_after))
+            cum[mask_exp] = cum_switch + cum_exp
 
         return cum
 
-    def _cumulative_hyperbolic(self, t: float) -> float:
-        """Cumulative production during hyperbolic phase."""
+    def _cumulative_hyperbolic_vec(self, t: np.ndarray) -> np.ndarray:
+        """Vectorized cumulative production during hyperbolic phase."""
         if self.b <= 0.01:
             # Exponential: Np = qi/Di * (1 - exp(-Di*t))
             return (self.qi / self.di) * (1 - np.exp(-self.di * t))
@@ -249,6 +252,8 @@ class ForecastResult:
         data_points_used: Number of production points used in fit
         t_fit: Optional time array used for fitting (for residual analysis)
         residuals: Optional residuals array (actual - predicted)
+        acceptable_r_squared: Threshold for is_acceptable check (default 0.7)
+        prediction_intervals: Optional dict with P5, P50, P95 forecast arrays
     """
     model: HyperbolicModel
     r_squared: float
@@ -259,11 +264,13 @@ class ForecastResult:
     data_points_used: int
     t_fit: np.ndarray | None = None
     residuals: np.ndarray | None = None
+    acceptable_r_squared: float = 0.7
+    prediction_intervals: dict | None = None
 
     @property
     def is_acceptable(self) -> bool:
         """Check if fit meets minimum quality threshold."""
-        return self.r_squared >= 0.7
+        return self.r_squared >= self.acceptable_r_squared
 
     def summary(self) -> dict:
         """Return summary dictionary of fit results."""

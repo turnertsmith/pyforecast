@@ -101,6 +101,9 @@ class RegimeDetectionConfig:
             regime detection. Wells with insufficient history return index 0
             (use all data). Default: 6 months.
 
+        adaptive: Whether to use CV-adaptive thresholds. When True, adjusts
+            thresholds based on data variability. Default: False.
+
     Example:
         >>> config = RegimeDetectionConfig(
         ...     threshold=0.5,       # More sensitive (50% increase)
@@ -112,6 +115,54 @@ class RegimeDetectionConfig:
     min_pct_increase: float = 1.0  # 100% minimum increase required
     sustained_months: int = 2
     min_data_points: int = 6
+    adaptive: bool = False
+
+
+def compute_adaptive_threshold(
+    rates: np.ndarray,
+    base_threshold: float,
+    base_n_sigma: float,
+) -> tuple[float, float]:
+    """Compute adaptive threshold based on coefficient of variation.
+
+    For noisy data (high CV), increases thresholds to reduce false positives.
+    For stable data (low CV), reduces thresholds to catch smaller events.
+
+    Adjustment factors:
+    - High CV (>0.5): threshold * 1.5, n_sigma * 1.5
+    - Medium CV (0.2-0.5): no change
+    - Low CV (<0.2): threshold * 0.75, n_sigma * 0.75
+
+    Args:
+        rates: Production rates array
+        base_threshold: Base min_pct_increase value
+        base_n_sigma: Base n_sigma value
+
+    Returns:
+        Tuple of (adjusted_threshold, adjusted_n_sigma)
+    """
+    if len(rates) < 3:
+        return base_threshold, base_n_sigma
+
+    # Compute coefficient of variation
+    mean_rate = np.mean(rates)
+    if mean_rate <= 0:
+        return base_threshold, base_n_sigma
+
+    cv = np.std(rates) / mean_rate
+
+    # Adjust based on CV
+    if cv > 0.5:
+        # High variability - increase thresholds to reduce false positives
+        adjustment = 1.5
+    elif cv < 0.2:
+        # Low variability - decrease thresholds to catch smaller events
+        adjustment = 0.75
+    else:
+        # Medium variability - no adjustment
+        adjustment = 1.0
+
+    return base_threshold * adjustment, base_n_sigma * adjustment
 
 
 def _fit_exponential_window(t: np.ndarray, q: np.ndarray) -> tuple[float, float, float]:
@@ -231,6 +282,15 @@ def detect_regime_change_improved(
     if n < config.min_data_points:
         return 0
 
+    # Apply adaptive thresholds if enabled
+    if config.adaptive:
+        min_pct_increase, n_sigma = compute_adaptive_threshold(
+            rates, config.min_pct_increase, config.n_sigma
+        )
+    else:
+        min_pct_increase = config.min_pct_increase
+        n_sigma = config.n_sigma
+
     # Track regime change candidates
     confirmed_regime_start = 0
 
@@ -252,8 +312,8 @@ def detect_regime_change_improved(
         # Threshold is the HIGHER of:
         # 1. Statistical: projected + n_sigma * residual_std
         # 2. Percentage: projected * (1 + min_pct_increase)
-        stat_threshold = projected + config.n_sigma * residual_std
-        pct_threshold = projected * (1 + config.min_pct_increase)
+        stat_threshold = projected + n_sigma * residual_std
+        pct_threshold = projected * (1 + min_pct_increase)
         threshold = max(stat_threshold, pct_threshold)
 
         actual = rates[i]
@@ -272,8 +332,8 @@ def detect_regime_change_improved(
                 projected_j = _project_rate(qi, di, months_ahead)
 
                 # Same threshold logic: higher of statistical or percentage
-                stat_threshold_j = projected_j + config.n_sigma * residual_std
-                pct_threshold_j = projected_j * (1 + config.min_pct_increase)
+                stat_threshold_j = projected_j + n_sigma * residual_std
+                pct_threshold_j = projected_j * (1 + min_pct_increase)
                 threshold_j = max(stat_threshold_j, pct_threshold_j)
 
                 if rates[j] > threshold_j:
@@ -294,63 +354,6 @@ def detect_regime_change_improved(
             i += 1
 
     return confirmed_regime_start
-
-
-def _find_most_recent_regime(
-    rates: np.ndarray,
-    config: RegimeDetectionConfig,
-) -> int:
-    """Find the most recent sustained regime change.
-
-    Scans backwards to find where the current production regime started.
-    """
-    n = len(rates)
-
-    if n < config.min_data_points:
-        return 0
-
-    # Track state for each point: is it "elevated" relative to prior trend?
-    elevated = np.zeros(n, dtype=bool)
-
-    for i in range(config.window_size, n):
-        window_start = i - config.window_size
-        window_end = i
-
-        t_window = np.arange(config.window_size, dtype=float)
-        q_window = rates[window_start:window_end]
-
-        qi, di, residual_std = _fit_exponential_window(t_window, q_window)
-        projected = _project_rate(qi, di, config.window_size)
-        threshold = projected + config.n_sigma * residual_std
-
-        elevated[i] = rates[i] > threshold
-
-    # Find runs of elevated points
-    # A regime change is confirmed if we have sustained_months consecutive elevated points
-    regime_start = 0
-    i = n - 1
-
-    while i >= config.window_size:
-        if elevated[i]:
-            # Found an elevated point, check if it's part of a sustained run
-            run_end = i
-            run_start = i
-
-            while run_start > config.window_size and elevated[run_start - 1]:
-                run_start -= 1
-
-            run_length = run_end - run_start + 1
-
-            if run_length >= config.sustained_months:
-                # This is a confirmed regime change
-                regime_start = run_start
-                break
-
-            i = run_start - 1
-        else:
-            i -= 1
-
-    return regime_start
 
 
 def analyze_regime_detection(

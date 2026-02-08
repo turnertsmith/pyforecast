@@ -40,7 +40,7 @@ class DeclinePlotter:
     def plot_well(
         self,
         well: Well,
-        product: Literal["oil", "gas"] = "oil",
+        product: Literal["oil", "gas", "water"] = "oil",
         show_regime: bool = True,
     ) -> go.Figure:
         """Create single well decline curve plot.
@@ -135,6 +135,29 @@ class DeclinePlotter:
                 )
             ))
 
+            # Add prediction interval bands if available
+            if result.prediction_intervals is not None:
+                intervals = result.prediction_intervals
+                t_int = intervals.get('t_forecast', None)
+                p5 = intervals.get('P5', None)
+                p95 = intervals.get('P95', None)
+
+                if t_int is not None and p5 is not None and p95 is not None:
+                    # Shift to plot coordinates
+                    t_int_plot = t_int - t_model_end + t_last
+
+                    # Add shaded region between P5 and P95
+                    fig.add_trace(go.Scatter(
+                        x=np.concatenate([t_int_plot, t_int_plot[::-1]]),
+                        y=np.concatenate([p95, p5[::-1]]),
+                        fill='toself',
+                        fillcolor='rgba(44, 160, 44, 0.2)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        name='90% Prediction Interval',
+                        showlegend=True,
+                        hoverinfo='skip',
+                    ))
+
         # Configure layout
         product_label = "Oil (bbl/day)" if product == "oil" else "Gas (mcf/day)"
         if product == "water":
@@ -185,7 +208,7 @@ class DeclinePlotter:
     def plot_multiple_wells(
         self,
         wells: list[Well],
-        product: Literal["oil", "gas"] = "oil",
+        product: Literal["oil", "gas", "water"] = "oil",
         normalize: bool = False,
     ) -> go.Figure:
         """Create overlay plot of multiple wells.

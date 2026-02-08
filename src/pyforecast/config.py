@@ -4,11 +4,14 @@ Supports YAML config files with per-product fitting parameters.
 CLI flags override config file values.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
+import logging
 from pathlib import Path
 from typing import Literal
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,10 +22,14 @@ class ProductConfig:
         b_min: Minimum b-factor (default 0.01)
         b_max: Maximum b-factor (default 1.5)
         dmin: Terminal decline rate, annual fraction (default 0.06 = 6%)
+        recency_half_life: Product-specific half-life for recency weighting (months).
+            If None, uses FittingDefaults.recency_half_life. Suggested defaults:
+            Oil=12, Gas=9, Water=18 months.
     """
     b_min: float = 0.01
     b_max: float = 1.5
     dmin: float = 0.06
+    recency_half_life: float | None = None
 
 
 @dataclass
@@ -46,9 +53,20 @@ class FittingDefaults:
     Attributes:
         recency_half_life: Half-life in months for exponential decay weighting (default 12)
         min_points: Minimum data points required for fitting (default 6)
+        model_selection: Model selection strategy - 'hyperbolic', 'exponential',
+            'harmonic', or 'auto' to try all and select best by BIC (default 'hyperbolic')
+        estimate_dmin: Estimate terminal decline from late-time data (default False)
+        dmin_min_annual: Minimum Dmin when estimating (default 0.024 = 2.4%/yr)
+        dmin_max_annual: Maximum Dmin when estimating (default 0.24 = 24%/yr)
+        adaptive_regime_detection: Use CV-adaptive thresholds for regime detection (default False)
     """
     recency_half_life: float = 12.0
     min_points: int = 6
+    model_selection: str = "hyperbolic"
+    estimate_dmin: bool = False
+    dmin_min_annual: float = 0.024
+    dmin_max_annual: float = 0.24
+    adaptive_regime_detection: bool = False
 
 
 @dataclass
@@ -137,6 +155,7 @@ class ValidationConfig:
         min_r_squared: Minimum acceptable R² value - FR001
         max_annual_decline: Maximum acceptable annual decline rate - FR005
         strict_mode: If True, treat warnings as errors
+        acceptable_r_squared: Threshold for ForecastResult.is_acceptable (default 0.7)
     """
     max_oil_rate: float = 50000.0
     max_gas_rate: float = 500000.0
@@ -148,6 +167,7 @@ class ValidationConfig:
     min_r_squared: float = 0.5
     max_annual_decline: float = 1.0
     strict_mode: bool = False
+    acceptable_r_squared: float = 0.7
 
 
 @dataclass
@@ -253,9 +273,38 @@ class PyForecastConfig:
         config.validate()
         return config
 
+    @staticmethod
+    def _filter_unknown_keys(
+        section_data: dict,
+        dataclass_type: type,
+        section_name: str,
+    ) -> dict:
+        """Filter unknown keys from a config section and warn about them.
+
+        Args:
+            section_data: Raw config dictionary for a section
+            dataclass_type: The dataclass type to validate against
+            section_name: Section name for error messages
+
+        Returns:
+            Filtered dictionary with only known keys
+        """
+        known_keys = {f.name for f in dataclass_fields(dataclass_type)}
+        unknown_keys = set(section_data) - known_keys
+        if unknown_keys:
+            logger.warning(
+                f"Unknown key(s) in '{section_name}' config section: "
+                f"{', '.join(sorted(unknown_keys))}. "
+                f"Valid keys: {', '.join(sorted(known_keys))}"
+            )
+        return {k: v for k, v in section_data.items() if k in known_keys}
+
     @classmethod
     def from_dict(cls, data: dict) -> "PyForecastConfig":
         """Create configuration from dictionary.
+
+        Unknown keys in any section are logged as warnings and ignored,
+        rather than causing opaque TypeErrors.
 
         Args:
             data: Configuration dictionary
@@ -265,37 +314,45 @@ class PyForecastConfig:
         """
         config = cls()
 
+        # Known top-level sections
+        known_sections = {"oil", "gas", "water", "regime", "fitting", "output", "validation", "refinement"}
+        unknown_sections = set(data) - known_sections
+        if unknown_sections:
+            logger.warning(
+                f"Unknown top-level config section(s): {', '.join(sorted(unknown_sections))}. "
+                f"Valid sections: {', '.join(sorted(known_sections))}"
+            )
+
         # Product configs
         if "oil" in data:
-            config.oil = ProductConfig(**data["oil"])
+            config.oil = ProductConfig(**cls._filter_unknown_keys(data["oil"], ProductConfig, "oil"))
         if "gas" in data:
-            config.gas = ProductConfig(**data["gas"])
+            config.gas = ProductConfig(**cls._filter_unknown_keys(data["gas"], ProductConfig, "gas"))
         if "water" in data:
-            config.water = ProductConfig(**data["water"])
+            config.water = ProductConfig(**cls._filter_unknown_keys(data["water"], ProductConfig, "water"))
 
         # Regime config
         if "regime" in data:
-            config.regime = RegimeConfig(**data["regime"])
+            config.regime = RegimeConfig(**cls._filter_unknown_keys(data["regime"], RegimeConfig, "regime"))
 
         # Fitting defaults
         if "fitting" in data:
-            config.fitting = FittingDefaults(**data["fitting"])
+            config.fitting = FittingDefaults(**cls._filter_unknown_keys(data["fitting"], FittingDefaults, "fitting"))
 
         # Output config
         if "output" in data:
-            output_data = data["output"].copy()
-            # Handle products list
+            output_data = cls._filter_unknown_keys(data["output"], OutputConfig, "output")
             if "products" in output_data:
                 output_data["products"] = list(output_data["products"])
             config.output = OutputConfig(**output_data)
 
         # Validation config
         if "validation" in data:
-            config.validation = ValidationConfig(**data["validation"])
+            config.validation = ValidationConfig(**cls._filter_unknown_keys(data["validation"], ValidationConfig, "validation"))
 
         # Refinement config
         if "refinement" in data:
-            config.refinement = RefinementConfig(**data["refinement"])
+            config.refinement = RefinementConfig(**cls._filter_unknown_keys(data["refinement"], RefinementConfig, "refinement"))
 
         return config
 
@@ -306,16 +363,19 @@ class PyForecastConfig:
                 "b_min": self.oil.b_min,
                 "b_max": self.oil.b_max,
                 "dmin": self.oil.dmin,
+                "recency_half_life": self.oil.recency_half_life,
             },
             "gas": {
                 "b_min": self.gas.b_min,
                 "b_max": self.gas.b_max,
                 "dmin": self.gas.dmin,
+                "recency_half_life": self.gas.recency_half_life,
             },
             "water": {
                 "b_min": self.water.b_min,
                 "b_max": self.water.b_max,
                 "dmin": self.water.dmin,
+                "recency_half_life": self.water.recency_half_life,
             },
             "regime": {
                 "threshold": self.regime.threshold,
@@ -325,6 +385,11 @@ class PyForecastConfig:
             "fitting": {
                 "recency_half_life": self.fitting.recency_half_life,
                 "min_points": self.fitting.min_points,
+                "model_selection": self.fitting.model_selection,
+                "estimate_dmin": self.fitting.estimate_dmin,
+                "dmin_min_annual": self.fitting.dmin_min_annual,
+                "dmin_max_annual": self.fitting.dmin_max_annual,
+                "adaptive_regime_detection": self.fitting.adaptive_regime_detection,
             },
             "output": {
                 "products": self.output.products,
@@ -343,6 +408,7 @@ class PyForecastConfig:
                 "min_r_squared": self.validation.min_r_squared,
                 "max_annual_decline": self.validation.max_annual_decline,
                 "strict_mode": self.validation.strict_mode,
+                "acceptable_r_squared": self.validation.acceptable_r_squared,
             },
             "refinement": {
                 "enable_logging": self.refinement.enable_logging,
@@ -395,16 +461,19 @@ oil:
   b_min: 0.01      # Minimum b-factor (0.01 = near-exponential)
   b_max: 1.5       # Maximum b-factor (1.0 = harmonic, >1 = super-harmonic)
   dmin: 0.06       # Terminal decline rate (annual, 0.06 = 6%)
+  # recency_half_life: 12  # Optional: product-specific half-life (months)
 
 gas:
   b_min: 0.01
   b_max: 1.5
   dmin: 0.06
+  # recency_half_life: 9   # Gas typically has faster decline, weight recent data more
 
 water:
   b_min: 0.01
   b_max: 1.5
   dmin: 0.06
+  # recency_half_life: 18  # Water production more stable, weight history more
 
 # Regime change detection (RTP, refrac)
 regime:
@@ -416,6 +485,11 @@ regime:
 fitting:
   recency_half_life: 12.0  # Half-life for recent data weighting (months)
   min_points: 6            # Minimum months of data required
+  model_selection: hyperbolic  # auto, hyperbolic, exponential, or harmonic
+  estimate_dmin: false     # Estimate terminal decline from late-time data
+  dmin_min_annual: 0.024   # Min Dmin when estimating (2.4%/yr)
+  dmin_max_annual: 0.24    # Max Dmin when estimating (24%/yr)
+  adaptive_regime_detection: false  # Use CV-adaptive regime thresholds
 
 # Output options
 output:
@@ -439,6 +513,7 @@ validation:
   min_r_squared: 0.5      # Min acceptable R² - FR001
   max_annual_decline: 1.0 # Max annual decline rate - FR005
   strict_mode: false      # Treat warnings as errors
+  acceptable_r_squared: 0.7  # Threshold for ForecastResult.is_acceptable
 
 # Refinement settings (fit quality analysis - all disabled by default)
 refinement:

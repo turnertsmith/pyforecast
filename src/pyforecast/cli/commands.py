@@ -130,6 +130,13 @@ def process(
             help="Number of parallel workers for ground truth validation (default: 1 = sequential)",
         )
     ] = 1,
+    checkpoint: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--checkpoint",
+            help="Checkpoint file for resume capability. If the file exists, resumes from last checkpoint.",
+        )
+    ] = None,
 ) -> None:
     """Process production data and generate decline forecasts.
 
@@ -198,7 +205,14 @@ def process(
     typer.echo(f"Processing {len(input_files)} file(s)...")
     typer.echo(f"Products: {', '.join(pf_config.output.products)}")
     processor = BatchProcessor(batch_config)
-    result = processor.run(input_files, output)
+
+    if checkpoint:
+        typer.echo(f"Checkpoint file: {checkpoint}")
+        if checkpoint.exists():
+            typer.echo("  Resuming from existing checkpoint...")
+        result = processor.run_with_checkpoint(input_files, output, checkpoint_file=checkpoint)
+    else:
+        result = processor.run(input_files, output)
 
     # Log fits if enabled
     if log_fits and result.wells:
