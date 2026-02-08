@@ -102,12 +102,10 @@ class HindcastValidator:
         Returns:
             HindcastResult with validation metrics, or None if insufficient data
         """
-        # Get production data
         t = well.production.time_months
         q = well.production.get_product_daily(product)
         n_months = len(t)
 
-        # Check data sufficiency
         if not self.can_validate(n_months):
             logger.info(
                 f"Skipping hindcast for {well.well_id}/{product}: "
@@ -115,54 +113,12 @@ class HindcastValidator:
             )
             return None
 
-        # Split data
-        training_end = n_months - self.config.holdout_months
-        t_train = t[:training_end]
-        q_train = q[:training_end]
-        t_holdout = t[training_end:]
-        q_holdout = q[training_end:]
+        result = self.validate_with_data(t, q, fitter, well.well_id, product)
 
-        # Check for meaningful holdout data
-        if np.max(q_holdout) < self.config.min_holdout_rate:
-            logger.info(
-                f"Skipping hindcast for {well.well_id}/{product}: "
-                f"holdout rates too low (max={np.max(q_holdout):.2f})"
-            )
-            return None
+        if result is None and np.max(q[n_months - self.config.holdout_months:]) >= self.config.min_holdout_rate:
+            logger.warning(f"Hindcast fit failed for {well.well_id}/{product}")
 
-        # Fit on training data
-        try:
-            fit_result = fitter.fit(t_train, q_train)
-        except ValueError as e:
-            logger.warning(
-                f"Hindcast fit failed for {well.well_id}/{product}: {e}"
-            )
-            return None
-
-        # Predict holdout period
-        # Adjust time for prediction - continue from end of training
-        t_pred = t_holdout - t_train[fit_result.regime_start_idx]
-        q_pred = fit_result.model.rate(t_pred)
-
-        # Calculate metrics
-        metrics = self._calculate_metrics(q_holdout, q_pred)
-
-        return HindcastResult(
-            well_id=well.well_id,
-            product=product,
-            training_months=training_end,
-            holdout_months=self.config.holdout_months,
-            training_r_squared=fit_result.r_squared,
-            training_qi=fit_result.model.qi,
-            training_di=fit_result.model.di,
-            training_b=fit_result.model.b,
-            mape=metrics["mape"],
-            correlation=metrics["correlation"],
-            bias=metrics["bias"],
-            holdout_actual=q_holdout,
-            holdout_predicted=q_pred,
-            holdout_months_array=t_holdout,
-        )
+        return result
 
     def validate_with_data(
         self,
@@ -188,32 +144,25 @@ class HindcastValidator:
         """
         n_months = len(t)
 
-        # Check data sufficiency
         if not self.can_validate(n_months):
             return None
 
-        # Split data
         training_end = n_months - self.config.holdout_months
         t_train = t[:training_end]
         q_train = q[:training_end]
         t_holdout = t[training_end:]
         q_holdout = q[training_end:]
 
-        # Check for meaningful holdout data
         if np.max(q_holdout) < self.config.min_holdout_rate:
             return None
 
-        # Fit on training data
         try:
             fit_result = fitter.fit(t_train, q_train)
         except ValueError:
             return None
 
-        # Predict holdout period
         t_pred = t_holdout - t_train[fit_result.regime_start_idx]
         q_pred = fit_result.model.rate(t_pred)
-
-        # Calculate metrics
         metrics = self._calculate_metrics(q_holdout, q_pred)
 
         return HindcastResult(

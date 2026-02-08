@@ -1050,6 +1050,57 @@ class DeclineFitter:
             n_params=2, capture_residuals=capture_residuals,
         )
 
+    def _fit_hyperbolic_free_b(
+        self,
+        data: _PreparedFitData,
+        capture_residuals: bool = False,
+    ) -> ForecastResult:
+        """Fit hyperbolic decline with free b-factor.
+
+        Args:
+            data: Prepared fit data
+            capture_residuals: Whether to capture residuals
+
+        Returns:
+            ForecastResult with fitted hyperbolic model
+        """
+        qi0, di0, b0 = self.initial_guess(data.t_fit, data.q_fit, data.weights)
+        bounds_lower, bounds_upper = self._build_bounds(qi0, data.effective_dmin)
+
+        qi0 = np.clip(qi0, bounds_lower[0], bounds_upper[0])
+        di0 = np.clip(di0, bounds_lower[1], bounds_upper[1])
+        b0 = np.clip(b0, bounds_lower[2], bounds_upper[2])
+
+        try:
+            popt, _ = optimize.curve_fit(
+                _hyperbolic_model,
+                data.t_fit, data.q_fit,
+                p0=[qi0, di0, b0],
+                bounds=(bounds_lower, bounds_upper),
+                sigma=1.0 / np.sqrt(data.weights),
+                absolute_sigma=False,
+                method='trf', maxfev=5000,
+            )
+            qi_fit, di_fit, b_fit = popt
+        except (RuntimeError, optimize.OptimizeWarning):
+            def objective(params):
+                qi, di, b = params
+                pred = _hyperbolic_model(data.t_fit, qi, di, b)
+                return np.sum((data.q_fit - pred) ** 2 * data.weights)
+
+            opt_result = optimize.differential_evolution(
+                objective,
+                bounds=list(zip(bounds_lower, bounds_upper)),
+                seed=42, maxiter=1000, tol=1e-7,
+            )
+            qi_fit, di_fit, b_fit = opt_result.x
+
+        model = HyperbolicModel(qi=qi_fit, di=di_fit, b=b_fit, dmin=data.effective_dmin)
+        return self._build_result(
+            model, data.t_fit, data.q_fit, data.regime_start,
+            n_params=3, capture_residuals=capture_residuals,
+        )
+
     def fit_multimodel(
         self,
         t: np.ndarray,
@@ -1099,54 +1150,7 @@ class DeclineFitter:
 
         # Fit hyperbolic (b free)
         try:
-            qi0, di0, b0 = self.initial_guess(data.t_fit, data.q_fit, data.weights)
-
-            bounds_lower, bounds_upper = self._build_bounds(qi0, data.effective_dmin)
-
-            qi0 = np.clip(qi0, bounds_lower[0], bounds_upper[0])
-            di0 = np.clip(di0, bounds_lower[1], bounds_upper[1])
-            b0 = np.clip(b0, bounds_lower[2], bounds_upper[2])
-
-            try:
-                popt, _ = optimize.curve_fit(
-                    _hyperbolic_model,
-                    data.t_fit,
-                    data.q_fit,
-                    p0=[qi0, di0, b0],
-                    bounds=(bounds_lower, bounds_upper),
-                    sigma=1.0 / np.sqrt(data.weights),
-                    absolute_sigma=False,
-                    method='trf',
-                    maxfev=5000
-                )
-                qi_fit, di_fit, b_fit = popt
-            except (RuntimeError, optimize.OptimizeWarning):
-                def objective(params):
-                    qi, di, b = params
-                    pred = _hyperbolic_model(data.t_fit, qi, di, b)
-                    residuals = (data.q_fit - pred) ** 2 * data.weights
-                    return np.sum(residuals)
-
-                opt_result = optimize.differential_evolution(
-                    objective,
-                    bounds=list(zip(bounds_lower, bounds_upper)),
-                    seed=42,
-                    maxiter=1000,
-                    tol=1e-7
-                )
-                qi_fit, di_fit, b_fit = opt_result.x
-
-            model = HyperbolicModel(
-                qi=qi_fit,
-                di=di_fit,
-                b=b_fit,
-                dmin=self.config.dmin_monthly
-            )
-
-            hyp_result = self._build_result(
-                model, data.t_fit, data.q_fit, data.regime_start,
-                n_params=3, capture_residuals=capture_residuals,
-            )
+            hyp_result = self._fit_hyperbolic_free_b(data, capture_residuals)
             results.append(hyp_result)
         except Exception:
             pass

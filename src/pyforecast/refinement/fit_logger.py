@@ -137,80 +137,17 @@ class FitLogger:
         Returns:
             FitLogRecord that was logged, or None if quality thresholds not met
         """
-        # Extract basin/formation from well metadata if not provided
-        if basin is None:
-            basin = well.metadata.get("basin")
-        if formation is None:
-            formation = well.metadata.get("formation")
-
-        # Get total data points
-        t = well.production.time_months
-        data_points_total = len(t)
-
-        # Check quality thresholds if configured
-        if self.quality_thresholds is not None:
-            cv = None
-            if residuals is not None and residuals.mean != 0:
-                cv = abs(residuals.std / residuals.mean) if residuals.mean else None
-
-            passes, reason = self.quality_thresholds.passes(
-                data_points=fit_result.data_points_used,
-                r_squared=fit_result.r_squared,
-                coefficient_of_variation=cv,
-            )
-            if not passes:
-                self._skipped_count += 1
-                logger.debug(
-                    f"Skipping fit log for {well.well_id}/{product}: {reason}"
-                )
-                return None
-
-        # Create record
-        record = FitLogRecord(
-            timestamp=datetime.now(),
+        return self.log_from_data(
+            fit_result=fit_result,
             well_id=well.well_id,
             product=product,
-            basin=basin,
-            formation=formation,
-            data_points_total=data_points_total,
-            data_points_used=fit_result.data_points_used,
-            regime_start_idx=fit_result.regime_start_idx,
-            b_min=fitting_config.b_min,
-            b_max=fitting_config.b_max,
-            dmin_annual=fitting_config.dmin_annual,
-            recency_half_life=fitting_config.recency_half_life,
-            regime_threshold=fitting_config.regime_threshold,
-            qi=fit_result.model.qi,
-            di=fit_result.model.di,
-            b=fit_result.model.b,
-            r_squared=fit_result.r_squared,
-            rmse=fit_result.rmse,
-            aic=fit_result.aic,
-            bic=fit_result.bic,
+            fitting_config=fitting_config,
+            data_points_total=len(well.production.time_months),
+            hindcast=hindcast,
+            residuals=residuals,
+            basin=basin or well.metadata.get("basin"),
+            formation=formation or well.metadata.get("formation"),
         )
-
-        # Add hindcast results if available
-        if hindcast is not None:
-            record.hindcast_mape = hindcast.mape
-            record.hindcast_correlation = hindcast.correlation
-            record.hindcast_bias = hindcast.bias
-
-        # Add residual diagnostics if available
-        if residuals is not None:
-            record.residual_mean = residuals.mean
-            record.residual_std = residuals.std
-            record.durbin_watson = residuals.durbin_watson
-            record.early_bias = residuals.early_bias
-            record.late_bias = residuals.late_bias
-
-        # Add to batch
-        self._batch.append(record)
-
-        # Flush if batch is full
-        if len(self._batch) >= self.batch_size:
-            self.flush()
-
-        return record
 
     def log_from_data(
         self,

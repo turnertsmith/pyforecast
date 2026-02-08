@@ -299,6 +299,28 @@ class FitLogStorage:
 
         return len(records)
 
+    @staticmethod
+    def _build_where(
+        **filters: tuple[str, object] | None,
+    ) -> tuple[str, list]:
+        """Build WHERE clause from keyword filters.
+
+        Each keyword maps to (sql_operator, value). None values are skipped.
+        Datetime values are converted to isoformat strings.
+
+        Returns:
+            Tuple of (where_clause_str, params_list)
+        """
+        conditions: list[str] = []
+        params: list = []
+        for col_op, value in filters.values():
+            if value is None:
+                continue
+            conditions.append(col_op)
+            params.append(value.isoformat() if isinstance(value, datetime) else value)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        return where, params
+
     def query(
         self,
         well_id: str | None = None,
@@ -325,35 +347,17 @@ class FitLogStorage:
         Returns:
             List of matching FitLogRecords
         """
-        conditions = []
-        params = []
+        where, params = self._build_where(
+            well_id=("well_id = ?", well_id),
+            product=("product = ?", product),
+            basin=("basin = ?", basin),
+            formation=("formation = ?", formation),
+            min_r_squared=("r_squared >= ?", min_r_squared),
+            start_date=("timestamp >= ?", start_date),
+            end_date=("timestamp <= ?", end_date),
+        )
 
-        if well_id is not None:
-            conditions.append("well_id = ?")
-            params.append(well_id)
-        if product is not None:
-            conditions.append("product = ?")
-            params.append(product)
-        if basin is not None:
-            conditions.append("basin = ?")
-            params.append(basin)
-        if formation is not None:
-            conditions.append("formation = ?")
-            params.append(formation)
-        if min_r_squared is not None:
-            conditions.append("r_squared >= ?")
-            params.append(min_r_squared)
-        if start_date is not None:
-            conditions.append("timestamp >= ?")
-            params.append(start_date.isoformat())
-        if end_date is not None:
-            conditions.append("timestamp <= ?")
-            params.append(end_date.isoformat())
-
-        sql = "SELECT * FROM fit_logs"
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
-        sql += " ORDER BY timestamp DESC"
+        sql = f"SELECT * FROM fit_logs{where} ORDER BY timestamp DESC"
         if limit is not None:
             sql += f" LIMIT {limit}"
 
@@ -380,23 +384,14 @@ class FitLogStorage:
         Yields:
             FitLogRecord objects
         """
-        conditions = []
-        params = []
-
-        if start_date is not None:
-            conditions.append("timestamp >= ?")
-            params.append(start_date.isoformat())
-        if end_date is not None:
-            conditions.append("timestamp <= ?")
-            params.append(end_date.isoformat())
-
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " AND ".join(conditions)
+        where, params = self._build_where(
+            start_date=("timestamp >= ?", start_date),
+            end_date=("timestamp <= ?", end_date),
+        )
 
         offset = 0
         while True:
-            sql = f"SELECT * FROM fit_logs{where_clause} ORDER BY timestamp LIMIT {batch_size} OFFSET {offset}"
+            sql = f"SELECT * FROM fit_logs{where} ORDER BY timestamp LIMIT {batch_size} OFFSET {offset}"
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(sql, params)
@@ -430,31 +425,16 @@ class FitLogStorage:
         Returns:
             Count of matching records
         """
-        conditions = []
-        params = []
-
-        if basin is not None:
-            conditions.append("basin = ?")
-            params.append(basin)
-        if formation is not None:
-            conditions.append("formation = ?")
-            params.append(formation)
-        if product is not None:
-            conditions.append("product = ?")
-            params.append(product)
-        if start_date is not None:
-            conditions.append("timestamp >= ?")
-            params.append(start_date.isoformat())
-        if end_date is not None:
-            conditions.append("timestamp <= ?")
-            params.append(end_date.isoformat())
-
-        sql = "SELECT COUNT(*) FROM fit_logs"
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
+        where, params = self._build_where(
+            basin=("basin = ?", basin),
+            formation=("formation = ?", formation),
+            product=("product = ?", product),
+            start_date=("timestamp >= ?", start_date),
+            end_date=("timestamp <= ?", end_date),
+        )
 
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(sql, params)
+            cursor = conn.execute(f"SELECT COUNT(*) FROM fit_logs{where}", params)
             return cursor.fetchone()[0]
 
     def get_statistics(
@@ -477,28 +457,13 @@ class FitLogStorage:
         Returns:
             Dictionary with statistics (count, avg_r_squared, avg_mape, etc.)
         """
-        conditions = []
-        params = []
-
-        if basin is not None:
-            conditions.append("basin = ?")
-            params.append(basin)
-        if formation is not None:
-            conditions.append("formation = ?")
-            params.append(formation)
-        if product is not None:
-            conditions.append("product = ?")
-            params.append(product)
-        if start_date is not None:
-            conditions.append("timestamp >= ?")
-            params.append(start_date.isoformat())
-        if end_date is not None:
-            conditions.append("timestamp <= ?")
-            params.append(end_date.isoformat())
-
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " AND ".join(conditions)
+        where, params = self._build_where(
+            basin=("basin = ?", basin),
+            formation=("formation = ?", formation),
+            product=("product = ?", product),
+            start_date=("timestamp >= ?", start_date),
+            end_date=("timestamp <= ?", end_date),
+        )
 
         sql = f"""
         SELECT
@@ -513,7 +478,7 @@ class FitLogStorage:
             AVG(recency_half_life) as avg_recency_half_life,
             AVG(regime_threshold) as avg_regime_threshold
         FROM fit_logs
-        {where_clause}
+        {where}
         """
 
         with sqlite3.connect(self.db_path) as conn:

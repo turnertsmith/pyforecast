@@ -4,10 +4,10 @@ Supports YAML config files with per-product fitting parameters.
 CLI flags override config file values.
 """
 
-from dataclasses import dataclass, field, fields as dataclass_fields
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import yaml
 
@@ -195,14 +195,9 @@ class PyForecastConfig:
 
     def get_product_config(self, product: Literal["oil", "gas", "water"]) -> ProductConfig:
         """Get configuration for a specific product."""
-        if product == "oil":
-            return self.oil
-        elif product == "gas":
-            return self.gas
-        elif product == "water":
-            return self.water
-        else:
+        if product not in ("oil", "gas", "water"):
             raise ValueError(f"Unknown product: {product}")
+        return getattr(self, product)
 
     def validate(self) -> None:
         """Validate configuration values.
@@ -299,6 +294,13 @@ class PyForecastConfig:
             )
         return {k: v for k, v in section_data.items() if k in known_keys}
 
+    # Mapping of section name -> dataclass type for from_dict iteration
+    _SECTION_TYPES: ClassVar[dict[str, type]] = {
+        "oil": ProductConfig, "gas": ProductConfig, "water": ProductConfig,
+        "regime": RegimeConfig, "fitting": FittingDefaults, "output": OutputConfig,
+        "validation": ValidationConfig, "refinement": RefinementConfig,
+    }
+
     @classmethod
     def from_dict(cls, data: dict) -> "PyForecastConfig":
         """Create configuration from dictionary.
@@ -314,121 +316,25 @@ class PyForecastConfig:
         """
         config = cls()
 
-        # Known top-level sections
-        known_sections = {"oil", "gas", "water", "regime", "fitting", "output", "validation", "refinement"}
-        unknown_sections = set(data) - known_sections
+        unknown_sections = set(data) - set(cls._SECTION_TYPES)
         if unknown_sections:
             logger.warning(
                 f"Unknown top-level config section(s): {', '.join(sorted(unknown_sections))}. "
-                f"Valid sections: {', '.join(sorted(known_sections))}"
+                f"Valid sections: {', '.join(sorted(cls._SECTION_TYPES))}"
             )
 
-        # Product configs
-        if "oil" in data:
-            config.oil = ProductConfig(**cls._filter_unknown_keys(data["oil"], ProductConfig, "oil"))
-        if "gas" in data:
-            config.gas = ProductConfig(**cls._filter_unknown_keys(data["gas"], ProductConfig, "gas"))
-        if "water" in data:
-            config.water = ProductConfig(**cls._filter_unknown_keys(data["water"], ProductConfig, "water"))
-
-        # Regime config
-        if "regime" in data:
-            config.regime = RegimeConfig(**cls._filter_unknown_keys(data["regime"], RegimeConfig, "regime"))
-
-        # Fitting defaults
-        if "fitting" in data:
-            config.fitting = FittingDefaults(**cls._filter_unknown_keys(data["fitting"], FittingDefaults, "fitting"))
-
-        # Output config
-        if "output" in data:
-            output_data = cls._filter_unknown_keys(data["output"], OutputConfig, "output")
-            if "products" in output_data:
-                output_data["products"] = list(output_data["products"])
-            config.output = OutputConfig(**output_data)
-
-        # Validation config
-        if "validation" in data:
-            config.validation = ValidationConfig(**cls._filter_unknown_keys(data["validation"], ValidationConfig, "validation"))
-
-        # Refinement config
-        if "refinement" in data:
-            config.refinement = RefinementConfig(**cls._filter_unknown_keys(data["refinement"], RefinementConfig, "refinement"))
+        for section, dtype in cls._SECTION_TYPES.items():
+            if section in data:
+                section_data = cls._filter_unknown_keys(data[section], dtype, section)
+                if section == "output" and "products" in section_data:
+                    section_data["products"] = list(section_data["products"])
+                setattr(config, section, dtype(**section_data))
 
         return config
 
     def to_dict(self) -> dict:
         """Convert configuration to dictionary."""
-        return {
-            "oil": {
-                "b_min": self.oil.b_min,
-                "b_max": self.oil.b_max,
-                "dmin": self.oil.dmin,
-                "recency_half_life": self.oil.recency_half_life,
-            },
-            "gas": {
-                "b_min": self.gas.b_min,
-                "b_max": self.gas.b_max,
-                "dmin": self.gas.dmin,
-                "recency_half_life": self.gas.recency_half_life,
-            },
-            "water": {
-                "b_min": self.water.b_min,
-                "b_max": self.water.b_max,
-                "dmin": self.water.dmin,
-                "recency_half_life": self.water.recency_half_life,
-            },
-            "regime": {
-                "threshold": self.regime.threshold,
-                "window": self.regime.window,
-                "sustained_months": self.regime.sustained_months,
-            },
-            "fitting": {
-                "recency_half_life": self.fitting.recency_half_life,
-                "min_points": self.fitting.min_points,
-                "model_selection": self.fitting.model_selection,
-                "estimate_dmin": self.fitting.estimate_dmin,
-                "dmin_min_annual": self.fitting.dmin_min_annual,
-                "dmin_max_annual": self.fitting.dmin_max_annual,
-                "adaptive_regime_detection": self.fitting.adaptive_regime_detection,
-            },
-            "output": {
-                "products": self.output.products,
-                "plots": self.output.plots,
-                "batch_plot": self.output.batch_plot,
-                "format": self.output.format,
-            },
-            "validation": {
-                "max_oil_rate": self.validation.max_oil_rate,
-                "max_gas_rate": self.validation.max_gas_rate,
-                "max_water_rate": self.validation.max_water_rate,
-                "gap_threshold_months": self.validation.gap_threshold_months,
-                "outlier_sigma": self.validation.outlier_sigma,
-                "shutin_threshold": self.validation.shutin_threshold,
-                "min_cv": self.validation.min_cv,
-                "min_r_squared": self.validation.min_r_squared,
-                "max_annual_decline": self.validation.max_annual_decline,
-                "strict_mode": self.validation.strict_mode,
-                "acceptable_r_squared": self.validation.acceptable_r_squared,
-            },
-            "refinement": {
-                "enable_logging": self.refinement.enable_logging,
-                "log_storage": self.refinement.log_storage,
-                "log_path": self.refinement.log_path,
-                "enable_hindcast": self.refinement.enable_hindcast,
-                "hindcast_holdout_months": self.refinement.hindcast_holdout_months,
-                "min_training_months": self.refinement.min_training_months,
-                "enable_residual_analysis": self.refinement.enable_residual_analysis,
-                "known_events_file": self.refinement.known_events_file,
-                "enable_learning": self.refinement.enable_learning,
-                "min_data_points_for_logging": self.refinement.min_data_points_for_logging,
-                "max_coefficient_of_variation": self.refinement.max_coefficient_of_variation,
-                "min_r_squared_for_logging": self.refinement.min_r_squared_for_logging,
-                "ground_truth_file": self.refinement.ground_truth_file,
-                "ground_truth_months": self.refinement.ground_truth_months,
-                "ground_truth_lazy": self.refinement.ground_truth_lazy,
-                "ground_truth_workers": self.refinement.ground_truth_workers,
-            },
-        }
+        return asdict(self)
 
     def to_yaml(self, filepath: Path | str) -> None:
         """Save configuration to YAML file.

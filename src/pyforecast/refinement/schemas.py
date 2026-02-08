@@ -4,7 +4,7 @@ Defines structured data types for fit logging, hindcast validation,
 residual analysis, and ground truth comparison.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from datetime import date, datetime
 from typing import Any, Literal
 import uuid
@@ -108,79 +108,32 @@ class FitLogRecord:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for storage."""
-        return {
-            "fit_id": self.fit_id,
-            "timestamp": self.timestamp.isoformat(),
-            "well_id": self.well_id,
-            "product": self.product,
-            "basin": self.basin,
-            "formation": self.formation,
-            "data_points_total": self.data_points_total,
-            "data_points_used": self.data_points_used,
-            "regime_start_idx": self.regime_start_idx,
-            "b_min": self.b_min,
-            "b_max": self.b_max,
-            "dmin_annual": self.dmin_annual,
-            "recency_half_life": self.recency_half_life,
-            "regime_threshold": self.regime_threshold,
-            "qi": self.qi,
-            "di": self.di,
-            "b": self.b,
-            "r_squared": self.r_squared,
-            "rmse": self.rmse,
-            "aic": self.aic,
-            "bic": self.bic,
-            "residual_mean": self.residual_mean,
-            "residual_std": self.residual_std,
-            "durbin_watson": self.durbin_watson,
-            "early_bias": self.early_bias,
-            "late_bias": self.late_bias,
-            "hindcast_mape": self.hindcast_mape,
-            "hindcast_correlation": self.hindcast_correlation,
-            "hindcast_bias": self.hindcast_bias,
-        }
+        result = asdict(self)
+        result["timestamp"] = self.timestamp.isoformat()
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FitLogRecord":
         """Create from dictionary."""
-        # Handle timestamp conversion
         timestamp = data.get("timestamp")
         if isinstance(timestamp, str):
             timestamp = datetime.fromisoformat(timestamp)
         elif timestamp is None:
             timestamp = datetime.now()
 
-        return cls(
-            fit_id=data.get("fit_id", str(uuid.uuid4())),
-            timestamp=timestamp,
-            well_id=data.get("well_id", ""),
-            product=data.get("product", ""),
-            basin=data.get("basin"),
-            formation=data.get("formation"),
-            data_points_total=data.get("data_points_total", 0),
-            data_points_used=data.get("data_points_used", 0),
-            regime_start_idx=data.get("regime_start_idx", 0),
-            b_min=data.get("b_min", 0.01),
-            b_max=data.get("b_max", 1.5),
-            dmin_annual=data.get("dmin_annual", 0.06),
-            recency_half_life=data.get("recency_half_life", 12.0),
-            regime_threshold=data.get("regime_threshold", 1.0),
-            qi=data.get("qi", 0.0),
-            di=data.get("di", 0.0),
-            b=data.get("b", 0.0),
-            r_squared=data.get("r_squared", 0.0),
-            rmse=data.get("rmse", 0.0),
-            aic=data.get("aic", 0.0),
-            bic=data.get("bic", 0.0),
-            residual_mean=data.get("residual_mean"),
-            residual_std=data.get("residual_std"),
-            durbin_watson=data.get("durbin_watson"),
-            early_bias=data.get("early_bias"),
-            late_bias=data.get("late_bias"),
-            hindcast_mape=data.get("hindcast_mape"),
-            hindcast_correlation=data.get("hindcast_correlation"),
-            hindcast_bias=data.get("hindcast_bias"),
-        )
+        # Build kwargs from dataclass fields, using defaults for missing keys
+        defaults = cls()
+        kwargs = {"timestamp": timestamp}
+        for f in dataclass_fields(cls):
+            if f.name == "timestamp":
+                continue
+            if f.name in data and data[f.name] is not None:
+                kwargs[f.name] = data[f.name]
+            elif f.name == "fit_id" and f.name not in data:
+                kwargs[f.name] = str(uuid.uuid4())
+            else:
+                kwargs[f.name] = getattr(defaults, f.name)
+        return cls(**kwargs)
 
 
 @dataclass
@@ -249,19 +202,13 @@ class HindcastResult:
             and abs(self.bias) < 0.3
         )
 
+    _SUMMARY_EXCLUDE = {"holdout_actual", "holdout_predicted", "holdout_months_array"}
+
     def summary(self) -> dict[str, Any]:
         """Return summary dictionary."""
-        return {
-            "well_id": self.well_id,
-            "product": self.product,
-            "training_months": self.training_months,
-            "holdout_months": self.holdout_months,
-            "training_r_squared": self.training_r_squared,
-            "mape": self.mape,
-            "correlation": self.correlation,
-            "bias": self.bias,
-            "is_good_hindcast": self.is_good_hindcast,
-        }
+        result = {k: v for k, v in asdict(self).items() if k not in self._SUMMARY_EXCLUDE}
+        result["is_good_hindcast"] = self.is_good_hindcast
+        return result
 
 
 @dataclass
@@ -368,15 +315,7 @@ class ResidualDiagnostics:
 
     def summary(self) -> dict[str, Any]:
         """Return summary dictionary."""
-        return {
-            "mean": self.mean,
-            "std": self.std,
-            "autocorr_lag1": self.autocorr_lag1,
-            "durbin_watson": self.durbin_watson,
-            "early_bias": self.early_bias,
-            "late_bias": self.late_bias,
-            "has_systematic_pattern": self.has_systematic_pattern,
-        }
+        return {k: v for k, v in asdict(self).items() if k != "residuals"}
 
 
 @dataclass
@@ -429,18 +368,7 @@ class ParameterSuggestion:
 
     def summary(self) -> dict[str, Any]:
         """Return summary dictionary."""
-        return {
-            "grouping": self.grouping,
-            "sample_count": self.sample_count,
-            "product": self.product,
-            "suggested_recency_half_life": self.suggested_recency_half_life,
-            "suggested_regime_threshold": self.suggested_regime_threshold,
-            "suggested_regime_window": self.suggested_regime_window,
-            "suggested_regime_sustained_months": self.suggested_regime_sustained_months,
-            "avg_r_squared": self.avg_r_squared,
-            "avg_hindcast_mape": self.avg_hindcast_mape,
-            "confidence": self.confidence,
-        }
+        return asdict(self)
 
 
 @dataclass
@@ -555,6 +483,14 @@ class GroundTruthResult:
             and abs(self.b_abs_diff) < 0.3
         )
 
+    @staticmethod
+    def _tier_score(value: float, thresholds: tuple, reverse: bool = False) -> int:
+        """Score a value against 3 thresholds (3/2/1/0 points)."""
+        for i, thresh in enumerate(thresholds):
+            if (value > thresh) if reverse else (value < thresh):
+                return 3 - i
+        return 0
+
     @property
     def match_grade(self) -> str:
         """Return a grade for the match quality.
@@ -563,79 +499,34 @@ class GroundTruthResult:
             "A" (excellent), "B" (good), "C" (fair), "D" (poor),
             or "X" (insufficient data - MAPE unavailable)
         """
-        # Return X grade if MAPE couldn't be calculated
         if self.mape is None:
             return "X"
 
-        score = 0
+        score = (
+            self._tier_score(self.mape, (10, 20, 30))
+            + self._tier_score(self.correlation, (0.98, 0.95, 0.90), reverse=True)
+            + self._tier_score(abs(self.cumulative_diff_pct), (5, 15, 25))
+            + self._tier_score(abs(self.b_abs_diff), (0.1, 0.3, 0.5))
+        )
 
-        # MAPE scoring
-        if self.mape < 10:
-            score += 3
-        elif self.mape < 20:
-            score += 2
-        elif self.mape < 30:
-            score += 1
-
-        # Correlation scoring
-        if self.correlation > 0.98:
-            score += 3
-        elif self.correlation > 0.95:
-            score += 2
-        elif self.correlation > 0.90:
-            score += 1
-
-        # Cumulative diff scoring
-        abs_cum = abs(self.cumulative_diff_pct)
-        if abs_cum < 5:
-            score += 3
-        elif abs_cum < 15:
-            score += 2
-        elif abs_cum < 25:
-            score += 1
-
-        # b-factor diff scoring
-        abs_b = abs(self.b_abs_diff)
-        if abs_b < 0.1:
-            score += 3
-        elif abs_b < 0.3:
-            score += 2
-        elif abs_b < 0.5:
-            score += 1
-
-        # Grade based on total score (max 12)
         if score >= 10:
             return "A"
         elif score >= 7:
             return "B"
         elif score >= 4:
             return "C"
-        else:
-            return "D"
+        return "D"
+
+    _SUMMARY_EXCLUDE = {"forecast_months", "aries_rates", "pyf_rates"}
 
     def summary(self) -> dict[str, Any]:
         """Return summary dictionary."""
-        return {
-            "well_id": self.well_id,
-            "product": self.product,
-            "aries_qi": self.aries_qi,
-            "aries_di": self.aries_di,
-            "aries_b": self.aries_b,
-            "aries_decline_type": self.aries_decline_type,
-            "pyf_qi": self.pyf_qi,
-            "pyf_di": self.pyf_di,
-            "pyf_b": self.pyf_b,
-            "qi_pct_diff": self.qi_pct_diff,
-            "di_pct_diff": self.di_pct_diff,
-            "b_abs_diff": self.b_abs_diff,
-            "comparison_months": self.comparison_months,
-            "mape": self.mape,
-            "correlation": self.correlation,
-            "bias": self.bias,
-            "cumulative_diff_pct": self.cumulative_diff_pct,
-            "is_good_match": self.is_good_match,
-            "match_grade": self.match_grade,
-            "aries_start_date": self.aries_start_date.isoformat() if self.aries_start_date else None,
-            "pyf_start_date": self.pyf_start_date.isoformat() if self.pyf_start_date else None,
-            "alignment_warning": self.alignment_warning,
-        }
+        result = {k: v for k, v in asdict(self).items() if k not in self._SUMMARY_EXCLUDE}
+        result["is_good_match"] = self.is_good_match
+        result["match_grade"] = self.match_grade
+        # Convert dates to ISO strings
+        for key in ("aries_start_date", "pyf_start_date"):
+            val = result.get(key)
+            if isinstance(val, date):
+                result[key] = val.isoformat()
+        return result

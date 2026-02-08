@@ -232,26 +232,20 @@ class GroundTruthValidator:
         """
         rates = rates.copy()
 
-        if np.any(np.isnan(rates)):
-            nan_count = np.sum(np.isnan(rates))
-            logger.warning(
-                f"{source}: {nan_count} NaN values in forecast rates, replacing with 0"
-            )
-            rates = np.nan_to_num(rates, nan=0.0)
+        checks = [
+            (np.isnan, "NaN values in forecast rates, replacing with 0",
+             lambda r: np.nan_to_num(r, nan=0.0)),
+            (np.isinf, "infinite values in forecast rates, clipping",
+             lambda r: np.clip(r, 0, 1e9)),
+            (lambda r: r < 0, "negative rates detected, clipping to 0",
+             lambda r: np.maximum(r, 0)),
+        ]
 
-        if np.any(np.isinf(rates)):
-            inf_count = np.sum(np.isinf(rates))
-            logger.warning(
-                f"{source}: {inf_count} infinite values in forecast rates, clipping"
-            )
-            rates = np.clip(rates, 0, 1e9)
-
-        if np.any(rates < 0):
-            neg_count = np.sum(rates < 0)
-            logger.warning(
-                f"{source}: {neg_count} negative rates detected, clipping to 0"
-            )
-            rates = np.maximum(rates, 0)
+        for detect_fn, msg, fix_fn in checks:
+            mask = detect_fn(rates)
+            if np.any(mask):
+                logger.warning(f"{source}: {np.sum(mask)} {msg}")
+                rates = fix_fn(rates)
 
         return rates
 
@@ -329,6 +323,39 @@ class GroundTruthValidator:
         mean_diff = np.mean(predicted - actual)
         return float(mean_diff / mean_actual)
 
+    def _collect_id_mismatches(
+        self,
+        wells: list["Well"],
+    ) -> tuple[list[str], list[str]]:
+        """Collect well ID mismatches between pyforecast and ARIES.
+
+        Returns:
+            Tuple of (wells_in_pyf_only, wells_in_aries_only)
+        """
+        pyf_ids: set[str] = set()
+        for well in wells:
+            propnum = (
+                well.identifier.propnum
+                or well.identifier.api
+                or well.identifier.entity_id
+            )
+            if propnum:
+                pyf_ids.add(normalize_well_id(propnum))
+
+        aries_ids = set(self.importer.list_wells())
+        wells_in_pyf_only = sorted(pyf_ids - aries_ids)
+        wells_in_aries_only = sorted(aries_ids - pyf_ids)
+
+        for label, ids in [("pyforecast but not ARIES", wells_in_pyf_only),
+                           ("ARIES but not pyforecast", wells_in_aries_only)]:
+            if ids:
+                logger.info(
+                    f"Wells in {label} ({len(ids)}): "
+                    f"{ids[:5]}{'...' if len(ids) > 5 else ''}"
+                )
+
+        return wells_in_pyf_only, wells_in_aries_only
+
     def validate_batch(
         self,
         wells: list["Well"],
@@ -343,39 +370,9 @@ class GroundTruthValidator:
         Returns:
             GroundTruthSummary with results and ID matching diagnostics
         """
+        wells_in_pyf_only, wells_in_aries_only = self._collect_id_mismatches(wells)
+
         results = []
-
-        # Collect pyforecast well IDs (normalized)
-        pyf_ids: set[str] = set()
-        for well in wells:
-            propnum = (
-                well.identifier.propnum
-                or well.identifier.api
-                or well.identifier.entity_id
-            )
-            if propnum:
-                pyf_ids.add(normalize_well_id(propnum))
-
-        # Get ARIES well IDs
-        aries_ids = set(self.importer.list_wells())
-
-        # Find mismatches
-        wells_in_pyf_only = sorted(pyf_ids - aries_ids)
-        wells_in_aries_only = sorted(aries_ids - pyf_ids)
-
-        # Log mismatches if any
-        if wells_in_pyf_only:
-            logger.info(
-                f"Wells in pyforecast but not ARIES ({len(wells_in_pyf_only)}): "
-                f"{wells_in_pyf_only[:5]}{'...' if len(wells_in_pyf_only) > 5 else ''}"
-            )
-        if wells_in_aries_only:
-            logger.info(
-                f"Wells in ARIES but not pyforecast ({len(wells_in_aries_only)}): "
-                f"{wells_in_aries_only[:5]}{'...' if len(wells_in_aries_only) > 5 else ''}"
-            )
-
-        # Validate each well/product combination
         for well in wells:
             for product in products:
                 result = self.validate(well, product)
@@ -397,10 +394,6 @@ class GroundTruthValidator:
     ) -> GroundTruthSummary:
         """Validate all wells in parallel for large batches.
 
-        Uses ThreadPoolExecutor for concurrent validation. Provides
-        speedup for large datasets at the cost of slightly higher
-        memory usage.
-
         Args:
             wells: List of wells with fitted forecasts
             products: Products to validate (e.g., ["oil", "gas"])
@@ -409,42 +402,11 @@ class GroundTruthValidator:
         Returns:
             GroundTruthSummary with results and ID matching diagnostics
         """
+        wells_in_pyf_only, wells_in_aries_only = self._collect_id_mismatches(wells)
+
         results: list[GroundTruthResult] = []
-
-        # Collect pyforecast well IDs (normalized)
-        pyf_ids: set[str] = set()
-        for well in wells:
-            propnum = (
-                well.identifier.propnum
-                or well.identifier.api
-                or well.identifier.entity_id
-            )
-            if propnum:
-                pyf_ids.add(normalize_well_id(propnum))
-
-        # Get ARIES well IDs
-        aries_ids = set(self.importer.list_wells())
-
-        # Find mismatches
-        wells_in_pyf_only = sorted(pyf_ids - aries_ids)
-        wells_in_aries_only = sorted(aries_ids - pyf_ids)
-
-        # Log mismatches if any
-        if wells_in_pyf_only:
-            logger.info(
-                f"Wells in pyforecast but not ARIES ({len(wells_in_pyf_only)}): "
-                f"{wells_in_pyf_only[:5]}{'...' if len(wells_in_pyf_only) > 5 else ''}"
-            )
-        if wells_in_aries_only:
-            logger.info(
-                f"Wells in ARIES but not pyforecast ({len(wells_in_aries_only)}): "
-                f"{wells_in_aries_only[:5]}{'...' if len(wells_in_aries_only) > 5 else ''}"
-            )
-
-        # Build list of tasks
         tasks = [(well, product) for well in wells for product in products]
 
-        # Validate in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self.validate, well, product): (well.well_id, product)

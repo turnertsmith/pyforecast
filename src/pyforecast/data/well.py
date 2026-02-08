@@ -116,37 +116,28 @@ class ProductionData:
             return monthly
         return monthly / self.days_in_month
 
+    def _cached_daily(self, monthly: np.ndarray, cache_attr: str) -> np.ndarray:
+        """Get cached daily rate, computing on first access."""
+        cached = getattr(self, cache_attr)
+        if cached is None:
+            cached = monthly if len(self.days_in_month) == 0 else monthly / self.days_in_month
+            object.__setattr__(self, cache_attr, cached)
+        return cached
+
     @property
     def oil_daily(self) -> np.ndarray:
         """Oil production as daily rate (bbl/day). Cached after first access."""
-        if self._oil_daily is None:
-            if len(self.days_in_month) == 0:
-                self._oil_daily = self.oil
-            else:
-                self._oil_daily = self.oil / self.days_in_month
-        return self._oil_daily
+        return self._cached_daily(self.oil, "_oil_daily")
 
     @property
     def gas_daily(self) -> np.ndarray:
         """Gas production as daily rate (mcf/day). Cached after first access."""
-        if self._gas_daily is None:
-            if len(self.days_in_month) == 0:
-                self._gas_daily = self.gas
-            else:
-                self._gas_daily = self.gas / self.days_in_month
-        return self._gas_daily
+        return self._cached_daily(self.gas, "_gas_daily")
 
     @property
     def water_daily(self) -> np.ndarray | None:
         """Water production as daily rate (bbl/day). Cached after first access."""
-        if self.water is None:
-            return None
-        if self._water_daily is None:
-            if len(self.days_in_month) == 0:
-                self._water_daily = self.water
-            else:
-                self._water_daily = self.water / self.days_in_month
-        return self._water_daily
+        return None if self.water is None else self._cached_daily(self.water, "_water_daily")
 
     @property
     def n_months(self) -> int:
@@ -215,6 +206,8 @@ class Well:
         """
         return self.production.n_months >= min_months
 
+    _VALID_PRODUCTS = ("oil", "gas", "water")
+
     def get_forecast(self, product: Literal["oil", "gas", "water"]) -> ForecastResult | None:
         """Get forecast result for specified product.
 
@@ -224,13 +217,9 @@ class Well:
         Returns:
             ForecastResult or None if not fitted
         """
-        if product == "oil":
-            return self.forecast_oil
-        elif product == "gas":
-            return self.forecast_gas
-        elif product == "water":
-            return self.forecast_water
-        return None
+        if product not in self._VALID_PRODUCTS:
+            return None
+        return getattr(self, f"forecast_{product}")
 
     def set_forecast(self, product: Literal["oil", "gas", "water"], result: ForecastResult) -> None:
         """Set forecast result for specified product.
@@ -239,9 +228,5 @@ class Well:
             product: Product type
             result: ForecastResult from fitting
         """
-        if product == "oil":
-            self.forecast_oil = result
-        elif product == "gas":
-            self.forecast_gas = result
-        elif product == "water":
-            self.forecast_water = result
+        if product in self._VALID_PRODUCTS:
+            setattr(self, f"forecast_{product}", result)

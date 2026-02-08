@@ -759,6 +759,43 @@ class BatchProcessor:
             refinement_results=all_refinement_results,
         )
 
+    def _run_pipeline(
+        self,
+        input_files: list[Path | str],
+        output_dir: Path | str | None,
+        process_fn,
+        **process_kwargs,
+    ) -> BatchResult:
+        """Shared pipeline for run() and run_with_checkpoint().
+
+        Args:
+            input_files: Input file paths
+            output_dir: Output directory (overrides config)
+            process_fn: Processing method to call with wells
+            **process_kwargs: Additional kwargs for process_fn
+
+        Returns:
+            BatchResult with processed wells
+        """
+        output_dir = Path(output_dir) if output_dir else self.config.output_dir
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Loading wells from {len(input_files)} file(s)")
+        wells = self.load_files(input_files)
+        logger.info(f"Loaded {len(wells)} total wells")
+
+        result = process_fn(wells, **process_kwargs)
+        logger.info(
+            f"Processing complete: {result.successful} successful, "
+            f"{result.failed} failed, {result.skipped} skipped"
+        )
+
+        if output_dir:
+            self._save_outputs(result, output_dir)
+
+        return result
+
     def run(
         self,
         input_files: list[Path | str],
@@ -775,26 +812,10 @@ class BatchProcessor:
         Returns:
             BatchResult with processed wells
         """
-        output_dir = Path(output_dir) if output_dir else self.config.output_dir
-        if output_dir:
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Load wells
-        logger.info(f"Loading wells from {len(input_files)} file(s)")
-        wells = self.load_files(input_files)
-        logger.info(f"Loaded {len(wells)} total wells")
-
-        # Process wells
-        result = self.process(wells, show_progress=show_progress)
-        logger.info(
-            f"Processing complete: {result.successful} successful, "
-            f"{result.failed} failed, {result.skipped} skipped"
+        return self._run_pipeline(
+            input_files, output_dir, self.process,
+            show_progress=show_progress,
         )
-
-        if output_dir:
-            self._save_outputs(result, output_dir)
-
-        return result
 
     def run_with_checkpoint(
         self,
@@ -814,30 +835,11 @@ class BatchProcessor:
         Returns:
             BatchResult with processed wells
         """
-        output_dir = Path(output_dir) if output_dir else self.config.output_dir
-        if output_dir:
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Load wells
-        logger.info(f"Loading wells from {len(input_files)} file(s)")
-        wells = self.load_files(input_files)
-        logger.info(f"Loaded {len(wells)} total wells")
-
-        # Process wells with checkpoint
-        result = self.process_with_checkpoint(
-            wells,
+        return self._run_pipeline(
+            input_files, output_dir, self.process_with_checkpoint,
             checkpoint_file=checkpoint_file,
             show_progress=show_progress,
         )
-        logger.info(
-            f"Processing complete: {result.successful} successful, "
-            f"{result.failed} failed, {result.skipped} skipped"
-        )
-
-        if output_dir:
-            self._save_outputs(result, output_dir)
-
-        return result
 
     def _save_outputs(self, result: BatchResult, output_dir: Path) -> None:
         """Save all outputs to directory.
