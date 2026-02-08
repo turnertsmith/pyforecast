@@ -86,7 +86,7 @@ class BatchVisualizer:
                         filepath = output_dir / filename
                         self.plotter.save(fig, filepath)
                         created_plots.append(filepath)
-                    except Exception as e:
+                    except (ValueError, TypeError, OSError) as e:
                         logger.warning(f"Failed to plot {well.well_id}/{product}: {e}")
 
         logger.info(f"Created {len(created_plots)} individual plots in {output_dir}")
@@ -137,7 +137,7 @@ class BatchVisualizer:
                         f"{len(wells_with_forecast)} wells"
                     )
 
-            except Exception as e:
+            except (ValueError, TypeError, OSError) as e:
                 logger.warning(f"Failed to create batch plot for {product}: {e}")
 
         logger.info(f"Created {len(created_plots)} batch plots in {output_dir}")

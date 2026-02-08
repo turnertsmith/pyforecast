@@ -11,8 +11,8 @@ import numpy as np
 from .result import (
     ValidationResult,
     ValidationIssue,
-    IssueSeverity,
     IssueCategory,
+    IssueSeverity,
 )
 
 if TYPE_CHECKING:
@@ -110,17 +110,10 @@ class InputValidator:
             future_indices = np.where(future_mask)[0].tolist()
 
             if future_indices:
-                result.add_issue(ValidationIssue(
-                    code="IV004",
-                    category=IssueCategory.DATA_FORMAT,
-                    severity=IssueSeverity.WARNING,
-                    message=f"Found {len(future_indices)} future dates in production data",
-                    guidance="Verify data dates are correct; future dates may indicate data entry errors",
-                    details={
-                        "future_date_count": len(future_indices),
-                        "first_future_date": str(dates_arr[future_indices[0]]),
-                        "indices": future_indices[:10],
-                    },
+                result.add_issue(ValidationIssue.future_dates(
+                    count=len(future_indices),
+                    first_date=str(dates_arr[future_indices[0]]),
+                    indices=future_indices,
                 ))
 
         except Exception as e:
@@ -171,18 +164,11 @@ class InputValidator:
             negative_indices = np.where(negative_mask)[0].tolist()
             negative_values = values[negative_mask].tolist()
 
-            result.add_issue(ValidationIssue(
-                code="IV001",
-                category=IssueCategory.DATA_FORMAT,
-                severity=IssueSeverity.ERROR,
-                message=f"Found {len(negative_indices)} negative {product} values",
-                guidance="Production values must be non-negative; check data source for errors",
-                details={
-                    "negative_count": len(negative_indices),
-                    "indices": negative_indices[:10],
-                    "values": negative_values[:10],
-                    "product": product,
-                },
+            result.add_issue(ValidationIssue.negative_values(
+                product=product,
+                count=len(negative_indices),
+                indices=negative_indices,
+                values=negative_values,
             ))
 
         # Check for values exceeding threshold
@@ -193,20 +179,13 @@ class InputValidator:
             exceeds_indices = np.where(exceeds_mask)[0].tolist()
             exceeds_values = values[exceeds_mask].tolist()
 
-            result.add_issue(ValidationIssue(
-                code="IV002",
-                category=IssueCategory.DATA_FORMAT,
-                severity=IssueSeverity.WARNING,
-                message=f"Found {len(exceeds_indices)} {product} values exceeding {max_rate:,.0f}",
-                guidance="Very high production values may indicate unit conversion issues or data errors",
-                details={
-                    "exceeds_count": len(exceeds_indices),
-                    "threshold": max_rate,
-                    "indices": exceeds_indices[:10],
-                    "values": exceeds_values[:10],
-                    "max_value": float(np.max(values)),
-                    "product": product,
-                },
+            result.add_issue(ValidationIssue.exceeds_threshold(
+                product=product,
+                count=len(exceeds_indices),
+                threshold=max_rate,
+                indices=exceeds_indices,
+                values=exceeds_values,
+                max_value=float(np.max(values)),
             ))
 
         return result

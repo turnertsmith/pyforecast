@@ -214,88 +214,99 @@ def process(
     else:
         result = processor.run(input_files, output)
 
-    # Log fits if enabled
+    # Post-processing steps
     if log_fits and result.wells:
-        from ..refinement.fit_logger import FitLogger
+        _handle_fit_logging(result, batch_config, pf_config)
 
-        typer.echo("Logging fit results...")
-        with FitLogger() as fit_logger:
-            for well in result.wells:
-                for prod in pf_config.output.products:
-                    forecast = well.get_forecast(prod)
-                    if forecast is not None:
-                        fitting_config = batch_config.get_fitting_config(prod)
+    gt_results = _handle_ground_truth(
+        result, pf_config, ground_truth, gt_months, gt_lazy, gt_workers,
+    )
 
-                        # Get hindcast result if available
-                        hindcast_result = None
-                        if result.refinement_results and result.refinement_results.hindcast_results:
-                            hindcast_result = result.refinement_results.hindcast_results.get(
-                                (well.well_id, prod)
-                            )
+    _report_results(result, gt_results, output, gt_plots)
 
-                        # Get residual diagnostics if available
-                        residual_diag = None
-                        if result.refinement_results and result.refinement_results.residual_diagnostics:
-                            residual_diag = result.refinement_results.residual_diagnostics.get(
-                                (well.well_id, prod)
-                            )
 
-                        fit_logger.log(
-                            forecast,
-                            well,
-                            prod,
-                            fitting_config,
-                            hindcast=hindcast_result,
-                            residuals=residual_diag,
+def _handle_fit_logging(result, batch_config, pf_config) -> None:
+    """Log fit results to persistent storage."""
+    from ..refinement.fit_logger import FitLogger
+
+    typer.echo("Logging fit results...")
+    with FitLogger() as fit_logger:
+        for well in result.wells:
+            for prod in pf_config.output.products:
+                forecast = well.get_forecast(prod)
+                if forecast is not None:
+                    fitting_config = batch_config.get_fitting_config(prod)
+
+                    hindcast_result = None
+                    if result.refinement_results and result.refinement_results.hindcast_results:
+                        hindcast_result = result.refinement_results.hindcast_results.get(
+                            (well.well_id, prod)
                         )
 
-        typer.echo(f"  Logged {fit_logger.storage.count()} fits to storage")
+                    residual_diag = None
+                    if result.refinement_results and result.refinement_results.residual_diagnostics:
+                        residual_diag = result.refinement_results.residual_diagnostics.get(
+                            (well.well_id, prod)
+                        )
 
-    # Run ground truth comparison if requested (CLI flag or config)
-    gt_results = []
+                    fit_logger.log(
+                        forecast, well, prod, fitting_config,
+                        hindcast=hindcast_result, residuals=residual_diag,
+                    )
+
+    typer.echo(f"  Logged {fit_logger.storage.count()} fits to storage")
+
+
+def _handle_ground_truth(
+    result, pf_config, ground_truth, gt_months, gt_lazy, gt_workers,
+) -> list:
+    """Run ground truth comparison if configured."""
+    gt_results: list = []
+
     gt_file = ground_truth or (
         Path(pf_config.refinement.ground_truth_file)
         if pf_config.refinement.ground_truth_file
         else None
     )
+    if not gt_file or not result.wells:
+        return gt_results
+
     gt_comparison_months = gt_months if ground_truth else pf_config.refinement.ground_truth_months
 
-    if gt_file and result.wells:
-        from ..import_.aries_forecast import AriesForecastImporter
-        from ..refinement.ground_truth import GroundTruthValidator, GroundTruthConfig
+    from ..import_.aries_forecast import AriesForecastImporter
+    from ..refinement.ground_truth import GroundTruthValidator, GroundTruthConfig
 
-        typer.echo("Running ground truth comparison...")
-        aries_importer = AriesForecastImporter(lazy=gt_lazy)
-        try:
-            count = aries_importer.load(gt_file)
-            mode_str = " (lazy mode)" if gt_lazy else ""
-            typer.echo(f"  Loaded {count} ARIES forecasts from {gt_file}{mode_str}")
-        except Exception as e:
-            typer.echo(f"  Error loading ARIES file: {e}", err=True)
-            aries_importer = None
+    typer.echo("Running ground truth comparison...")
+    aries_importer = AriesForecastImporter(lazy=gt_lazy)
+    try:
+        count = aries_importer.load(gt_file)
+        mode_str = " (lazy mode)" if gt_lazy else ""
+        typer.echo(f"  Loaded {count} ARIES forecasts from {gt_file}{mode_str}")
+    except (OSError, ValueError, KeyError) as e:
+        typer.echo(f"  Error loading ARIES file: {e}", err=True)
+        return gt_results
 
-        if aries_importer:
-            gt_config = GroundTruthConfig(comparison_months=gt_comparison_months)
-            gt_validator = GroundTruthValidator(aries_importer, gt_config)
+    gt_config = GroundTruthConfig(comparison_months=gt_comparison_months)
+    gt_validator = GroundTruthValidator(aries_importer, gt_config)
 
-            if gt_workers > 1:
-                # Parallel validation
-                typer.echo(f"  Using {gt_workers} parallel workers")
-                gt_summary_result = gt_validator.validate_batch_parallel(
-                    result.wells,
-                    pf_config.output.products,
-                    max_workers=gt_workers,
-                )
-                gt_results = gt_summary_result.results
-            else:
-                # Sequential validation
-                for well in result.wells:
-                    for prod in pf_config.output.products:
-                        gt_result = gt_validator.validate(well, prod)
-                        if gt_result is not None:
-                            gt_results.append(gt_result)
+    if gt_workers > 1:
+        typer.echo(f"  Using {gt_workers} parallel workers")
+        gt_summary_result = gt_validator.validate_batch_parallel(
+            result.wells, pf_config.output.products, max_workers=gt_workers,
+        )
+        gt_results = gt_summary_result.results
+    else:
+        for well in result.wells:
+            for prod in pf_config.output.products:
+                gt_result = gt_validator.validate(well, prod)
+                if gt_result is not None:
+                    gt_results.append(gt_result)
 
-    # Report results
+    return gt_results
+
+
+def _report_results(result, gt_results, output, gt_plots) -> None:
+    """Report processing results to console."""
     typer.echo("")
     typer.echo("Results:")
     typer.echo(f"  Successful: {result.successful}")
@@ -305,7 +316,7 @@ def process(
     if result.errors:
         typer.echo(f"\n{len(result.errors)} error(s) occurred. See {output}/errors.txt")
 
-    # Report validation summary
+    # Validation summary
     if result.validation_results:
         summary = result.get_validation_summary()
         typer.echo("")
@@ -322,7 +333,7 @@ def process(
         if summary['wells_with_errors'] > 0 or summary['wells_with_warnings'] > 0:
             typer.echo(f"\n  See {output}/validation_report.txt for details")
 
-    # Report refinement summary
+    # Refinement summary
     if result.refinement_results is not None:
         ref_results = result.refinement_results
         typer.echo("")
@@ -345,7 +356,7 @@ def process(
 
         typer.echo(f"\n  See {output}/refinement_report.txt for details")
 
-    # Report ground truth summary
+    # Ground truth summary
     if gt_results:
         from ..refinement.ground_truth import summarize_ground_truth_results
 
@@ -357,7 +368,6 @@ def process(
         typer.echo(f"  Average correlation: {gt_summary['avg_correlation']:.3f}")
         typer.echo(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%")
 
-        # Save ground truth report, CSV, and time-series
         _save_ground_truth_report(gt_results, gt_summary, output)
         _save_ground_truth_csv(gt_results, output)
         _save_ground_truth_timeseries(gt_results, output)
@@ -365,7 +375,6 @@ def process(
         typer.echo(f"  CSV export: {output}/ground_truth_results.csv")
         typer.echo(f"  Time-series: {output}/ground_truth_timeseries.csv")
 
-        # Generate plots if requested
         if gt_plots:
             try:
                 from ..refinement.plotting import plot_all_comparisons

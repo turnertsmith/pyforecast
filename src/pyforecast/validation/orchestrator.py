@@ -4,12 +4,12 @@ Provides a single entry point for running input, data quality, and fitting
 validation on wells, with unified result reporting.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from ..config import PyForecastConfig
 from ..data.well import Well
-from .result import ValidationResult, merge_results
+from .result import ValidationResult, merge_results, summarize_validation
 from .input_validator import InputValidator
 from .data_quality import DataQualityValidator
 from .fitting_validator import FittingValidator
@@ -30,9 +30,9 @@ class ValidationOrchestrator:
     """
 
     config: PyForecastConfig
-    input_validator: InputValidator = None  # type: ignore
-    quality_validator: DataQualityValidator = None  # type: ignore
-    fitting_validator: FittingValidator = None  # type: ignore
+    input_validator: InputValidator | None = field(default=None, init=False)
+    quality_validator: DataQualityValidator | None = field(default=None, init=False)
+    fitting_validator: FittingValidator | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Initialize validators from config."""
@@ -178,7 +178,7 @@ class ValidationOrchestrator:
                     if forecast is not None:
                         results.append(self.validate_post_fit(well, product))
 
-            except Exception:
+            except (ValueError, AttributeError, KeyError):
                 # Product may not be available - skip silently
                 pass
 
@@ -217,34 +217,9 @@ class ValidationOrchestrator:
         Returns:
             Dictionary with summary statistics
         """
-        total_wells = len(results)
-        wells_with_errors = sum(1 for r in results if r.has_errors)
-        wells_with_warnings = sum(1 for r in results if r.has_warnings)
-        total_errors = sum(r.error_count for r in results)
-        total_warnings = sum(r.warning_count for r in results)
-
-        # Count by code
-        by_code: dict[str, int] = {}
-        for result in results:
-            for issue in result.issues:
-                by_code[issue.code] = by_code.get(issue.code, 0) + 1
-
-        # Count by category
-        by_category: dict[str, int] = {}
-        for result in results:
-            for issue in result.issues:
-                cat_name = issue.category.name
-                by_category[cat_name] = by_category.get(cat_name, 0) + 1
-
-        return {
-            "total_wells": total_wells,
-            "wells_with_errors": wells_with_errors,
-            "wells_with_warnings": wells_with_warnings,
-            "total_errors": total_errors,
-            "total_warnings": total_warnings,
-            "by_code": by_code,
-            "by_category": by_category,
-        }
+        summary = summarize_validation(results)
+        summary["total_wells"] = len(results)
+        return summary
 
     def format_report(
         self,

@@ -187,39 +187,47 @@ class FittingValidator:
         if forecast is None:
             return result
 
+        self._check_fit_quality(result, forecast, product)
+        return result
+
+    def _check_fit_quality(
+        self,
+        result: ValidationResult,
+        forecast: "ForecastResult",
+        product: str = "",
+    ) -> None:
+        """Check fit quality metrics and add issues to result.
+
+        Shared logic between validate_post_fit() and validate_fit_result().
+
+        Args:
+            result: ValidationResult to add issues to
+            forecast: ForecastResult to check
+            product: Product label for messages
+        """
         # Check R² quality
         if forecast.r_squared < self.min_r_squared:
-            severity = (IssueSeverity.ERROR if forecast.r_squared < 0.3
-                        else IssueSeverity.WARNING)
-            result.add_issue(ValidationIssue(
-                code="FR001",
-                category=IssueCategory.FITTING_RESULT,
-                severity=severity,
-                message=f"Poor {product} fit quality: R²={forecast.r_squared:.3f}",
-                guidance="Low R² suggests poor model fit; consider data quality or alternative model",
-                details={
-                    "r_squared": float(forecast.r_squared),
-                    "threshold": self.min_r_squared,
-                    "rmse": float(forecast.rmse),
-                },
+            prefix = f"{product} " if product else ""
+            result.add_issue(ValidationIssue.poor_fit(
+                product=prefix.strip() or "overall",
+                r_squared=float(forecast.r_squared),
+                threshold=self.min_r_squared,
+                rmse=float(forecast.rmse),
             ))
 
         # Check b-factor bounds
         model = forecast.model
-        b_tolerance = 0.001  # Consider "at bound" if within this tolerance
+        b_tolerance = 0.001
+        prefix = f"{product} " if product else ""
 
         if abs(model.b - self.b_min) < b_tolerance:
             result.add_issue(ValidationIssue(
                 code="FR003",
                 category=IssueCategory.FITTING_RESULT,
                 severity=IssueSeverity.INFO,
-                message=f"{product} b-factor at lower bound ({model.b:.3f})",
+                message=f"{prefix}b-factor at lower bound ({model.b:.3f})",
                 guidance="B at lower bound suggests near-exponential decline; may be constrained by bound",
-                details={
-                    "b": float(model.b),
-                    "b_min": self.b_min,
-                    "b_max": self.b_max,
-                },
+                details={"b": float(model.b), "b_min": self.b_min, "b_max": self.b_max},
             ))
 
         if abs(model.b - self.b_max) < b_tolerance:
@@ -227,32 +235,22 @@ class FittingValidator:
                 code="FR004",
                 category=IssueCategory.FITTING_RESULT,
                 severity=IssueSeverity.WARNING,
-                message=f"{product} b-factor at upper bound ({model.b:.3f})",
+                message=f"{prefix}b-factor at upper bound ({model.b:.3f})",
                 guidance="B at upper bound may indicate transient flow or data issues; review fit",
-                details={
-                    "b": float(model.b),
-                    "b_min": self.b_min,
-                    "b_max": self.b_max,
-                },
+                details={"b": float(model.b), "b_min": self.b_min, "b_max": self.b_max},
             ))
 
-        # Check decline rate (convert monthly to annual)
+        # Check decline rate
         annual_decline = model.di * 12
         if annual_decline > self.max_annual_decline:
             result.add_issue(ValidationIssue(
                 code="FR005",
                 category=IssueCategory.FITTING_RESULT,
                 severity=IssueSeverity.WARNING,
-                message=f"Very high {product} decline rate: {annual_decline:.0%}/year",
+                message=f"Very high {prefix}decline rate: {annual_decline:.0%}/year",
                 guidance="Decline >100%/year is unusual; verify data quality and fit",
-                details={
-                    "annual_decline": float(annual_decline),
-                    "monthly_decline": float(model.di),
-                    "threshold": self.max_annual_decline,
-                },
+                details={"annual_decline": float(annual_decline), "monthly_decline": float(model.di), "threshold": self.max_annual_decline},
             ))
-
-        return result
 
     def validate_fit_result(
         self,
@@ -274,70 +272,5 @@ class FittingValidator:
             ValidationResult with any issues
         """
         result = ValidationResult(well_id=well_id, product=product)
-
-        # Check R² quality
-        if forecast.r_squared < self.min_r_squared:
-            severity = (IssueSeverity.ERROR if forecast.r_squared < 0.3
-                        else IssueSeverity.WARNING)
-            result.add_issue(ValidationIssue(
-                code="FR001",
-                category=IssueCategory.FITTING_RESULT,
-                severity=severity,
-                message=f"Poor fit quality: R²={forecast.r_squared:.3f}",
-                guidance="Low R² suggests poor model fit; consider data quality or alternative model",
-                details={
-                    "r_squared": float(forecast.r_squared),
-                    "threshold": self.min_r_squared,
-                    "rmse": float(forecast.rmse),
-                },
-            ))
-
-        # Check b-factor bounds
-        model = forecast.model
-        b_tolerance = 0.001
-
-        if abs(model.b - self.b_min) < b_tolerance:
-            result.add_issue(ValidationIssue(
-                code="FR003",
-                category=IssueCategory.FITTING_RESULT,
-                severity=IssueSeverity.INFO,
-                message=f"B-factor at lower bound ({model.b:.3f})",
-                guidance="B at lower bound suggests near-exponential decline; may be constrained by bound",
-                details={
-                    "b": float(model.b),
-                    "b_min": self.b_min,
-                    "b_max": self.b_max,
-                },
-            ))
-
-        if abs(model.b - self.b_max) < b_tolerance:
-            result.add_issue(ValidationIssue(
-                code="FR004",
-                category=IssueCategory.FITTING_RESULT,
-                severity=IssueSeverity.WARNING,
-                message=f"B-factor at upper bound ({model.b:.3f})",
-                guidance="B at upper bound may indicate transient flow or data issues; review fit",
-                details={
-                    "b": float(model.b),
-                    "b_min": self.b_min,
-                    "b_max": self.b_max,
-                },
-            ))
-
-        # Check decline rate
-        annual_decline = model.di * 12
-        if annual_decline > self.max_annual_decline:
-            result.add_issue(ValidationIssue(
-                code="FR005",
-                category=IssueCategory.FITTING_RESULT,
-                severity=IssueSeverity.WARNING,
-                message=f"Very high decline rate: {annual_decline:.0%}/year",
-                guidance="Decline >100%/year is unusual; verify data quality and fit",
-                details={
-                    "annual_decline": float(annual_decline),
-                    "monthly_decline": float(model.di),
-                    "threshold": self.max_annual_decline,
-                },
-            ))
-
+        self._check_fit_quality(result, forecast, product or "")
         return result

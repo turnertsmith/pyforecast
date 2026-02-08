@@ -51,6 +51,9 @@ class ProductionData:
     water: np.ndarray | None = None
     time_months: np.ndarray = field(init=False)
     days_in_month: np.ndarray = field(init=False)
+    _oil_daily: np.ndarray | None = field(init=False, default=None, repr=False)
+    _gas_daily: np.ndarray | None = field(init=False, default=None, repr=False)
+    _water_daily: np.ndarray | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Compute time_months and days_in_month from dates."""
@@ -115,26 +118,35 @@ class ProductionData:
 
     @property
     def oil_daily(self) -> np.ndarray:
-        """Oil production as daily rate (bbl/day)."""
-        if len(self.days_in_month) == 0:
-            return self.oil
-        return self.oil / self.days_in_month
+        """Oil production as daily rate (bbl/day). Cached after first access."""
+        if self._oil_daily is None:
+            if len(self.days_in_month) == 0:
+                self._oil_daily = self.oil
+            else:
+                self._oil_daily = self.oil / self.days_in_month
+        return self._oil_daily
 
     @property
     def gas_daily(self) -> np.ndarray:
-        """Gas production as daily rate (mcf/day)."""
-        if len(self.days_in_month) == 0:
-            return self.gas
-        return self.gas / self.days_in_month
+        """Gas production as daily rate (mcf/day). Cached after first access."""
+        if self._gas_daily is None:
+            if len(self.days_in_month) == 0:
+                self._gas_daily = self.gas
+            else:
+                self._gas_daily = self.gas / self.days_in_month
+        return self._gas_daily
 
     @property
     def water_daily(self) -> np.ndarray | None:
-        """Water production as daily rate (bbl/day)."""
+        """Water production as daily rate (bbl/day). Cached after first access."""
         if self.water is None:
             return None
-        if len(self.days_in_month) == 0:
-            return self.water
-        return self.water / self.days_in_month
+        if self._water_daily is None:
+            if len(self.days_in_month) == 0:
+                self._water_daily = self.water
+            else:
+                self._water_daily = self.water / self.days_in_month
+        return self._water_daily
 
     @property
     def n_months(self) -> int:

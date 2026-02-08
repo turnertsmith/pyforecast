@@ -66,11 +66,10 @@ WELL002,2020-01-01,6000,30000,800
 ```
 """
 
-import numpy as np
 import pandas as pd
 
 from .base import DataParser
-from .well import Well, WellIdentifier, ProductionData
+from .well import WellIdentifier
 
 
 class AriesParser(DataParser):
@@ -168,29 +167,15 @@ class AriesParser(DataParser):
         # Also detect by yyyymm date format
         return (has_propnum or has_aries_date) and has_production
 
-    def _map_columns(self, df: pd.DataFrame) -> dict[str, str]:
-        """Map DataFrame columns to standard names."""
-        cols_lower = {c.lower().strip(): c for c in df.columns}
-        mapping = {}
+    def _resolve_id_column(self, col_map: dict[str, str]) -> str:
+        """Resolve ARIES ID column (propnum or api)."""
+        id_col = col_map.get('propnum') or col_map.get('api')
+        if not id_col:
+            raise ValueError("No identifier column (PROPNUM) found")
+        return id_col
 
-        for col_lower, actual_col in cols_lower.items():
-            if col_lower in self.COLUMN_MAPPINGS:
-                standard_name = self.COLUMN_MAPPINGS[col_lower]
-                if standard_name not in mapping:
-                    mapping[standard_name] = actual_col
-
-        return mapping
-
-    def _parse_aries_date(self, date_series: pd.Series) -> pd.Series:
-        """Parse ARIES date formats (YYYYMM or various date formats).
-
-        Args:
-            date_series: Series with date values
-
-        Returns:
-            Series with datetime values
-        """
-        # Try to detect format
+    def _parse_dates(self, date_series: pd.Series) -> pd.Series:
+        """Parse ARIES date formats (YYYYMM or various date formats)."""
         sample = str(date_series.iloc[0])
 
         # YYYYMM format (e.g., 202301)
@@ -204,53 +189,6 @@ class AriesParser(DataParser):
         # Try general parsing
         return pd.to_datetime(date_series)
 
-    def parse(self, df: pd.DataFrame) -> list[Well]:
-        """Parse ARIES DataFrame into Well objects."""
-        col_map = self._map_columns(df)
-
-        # Determine ID column
-        id_col = col_map.get('propnum') or col_map.get('api')
-        if not id_col:
-            raise ValueError("No identifier column (PROPNUM) found")
-
-        date_col = col_map.get('date')
-        if not date_col:
-            raise ValueError("No date column found")
-
-        oil_col = col_map.get('oil')
-        gas_col = col_map.get('gas')
-        water_col = col_map.get('water')
-
-        # Convert date column
-        df = df.copy()
-        df[date_col] = self._parse_aries_date(df[date_col])
-
-        # Group by well
-        wells = []
-        for well_id, group in df.groupby(id_col):
-            group = group.sort_values(date_col)
-
-            # Create identifier
-            identifier = WellIdentifier(
-                propnum=str(well_id),
-            )
-
-            # Extract production arrays
-            dates = group[date_col].values
-            oil = group[oil_col].fillna(0).values if oil_col else np.zeros(len(group))
-            gas = group[gas_col].fillna(0).values if gas_col else np.zeros(len(group))
-            water = group[water_col].fillna(0).values if water_col else None
-
-            production = ProductionData(
-                dates=dates,
-                oil=oil.astype(float),
-                gas=gas.astype(float),
-                water=water.astype(float) if water is not None else None,
-            )
-
-            wells.append(Well(
-                identifier=identifier,
-                production=production,
-            ))
-
-        return wells
+    def _build_identifier(self, well_id: str, col_map: dict[str, str], group: pd.DataFrame) -> WellIdentifier:
+        """Build identifier from ARIES columns."""
+        return WellIdentifier(propnum=well_id)

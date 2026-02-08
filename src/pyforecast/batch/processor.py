@@ -144,29 +144,8 @@ class BatchResult:
         Returns:
             Dict with counts by severity and category
         """
-        summary = {
-            "wells_with_errors": 0,
-            "wells_with_warnings": 0,
-            "total_errors": 0,
-            "total_warnings": 0,
-            "by_category": {},
-        }
-
-        for result in self.validation_results.values():
-            if result.has_errors:
-                summary["wells_with_errors"] += 1
-            if result.has_warnings:
-                summary["wells_with_warnings"] += 1
-            summary["total_errors"] += result.error_count
-            summary["total_warnings"] += result.warning_count
-
-            for issue in result.issues:
-                cat_name = issue.category.name
-                if cat_name not in summary["by_category"]:
-                    summary["by_category"][cat_name] = 0
-                summary["by_category"][cat_name] += 1
-
-        return summary
+        from ..validation.result import summarize_validation
+        return summarize_validation(self.validation_results)
 
 
 @dataclass
@@ -397,7 +376,7 @@ def _fit_single_well(
 
         except ValueError as e:
             errors.append(f"{product}: {str(e)}")
-        except Exception as e:
+        except (RuntimeError, TypeError, ArithmeticError) as e:
             errors.append(f"{product}: Unexpected error - {str(e)}")
 
     return well, errors, validation_result, refinement_result
@@ -430,7 +409,7 @@ class BatchProcessor:
                 wells = load_wells(filepath)
                 all_wells.extend(wells)
                 logger.info(f"Loaded {len(wells)} wells from {filepath}")
-            except Exception as e:
+            except (ValueError, OSError, KeyError) as e:
                 logger.error(f"Failed to load {filepath}: {e}")
 
         return all_wells
@@ -556,6 +535,48 @@ class BatchProcessor:
             for product, diagnostics in refinement_result.residual_diagnostics.items():
                 all_refinement_results.residual_diagnostics[(well_id, product)] = diagnostics
 
+    def _tally_future_result(
+        self,
+        future,
+        well_id: str,
+        processed_wells: list,
+        all_validation_results: dict,
+        all_refinement_results: RefinementResults | None,
+        errors_list: list,
+    ) -> tuple[bool, bool]:
+        """Process a completed future and tally the result.
+
+        Args:
+            future: Completed Future object
+            well_id: Well identifier
+            processed_wells: List to append processed well to
+            all_validation_results: Dict to store validation results
+            all_refinement_results: Optional RefinementResults to collect into
+            errors_list: List to append errors to
+
+        Returns:
+            Tuple of (is_success, is_failure) - exactly one will be True
+        """
+        try:
+            well, errors, validation_result, refinement_result = future.result()
+            processed_wells.append(well)
+            all_validation_results[well_id] = validation_result
+            self._collect_refinement(refinement_result, all_refinement_results, well_id)
+
+            if errors:
+                errors_list.extend((well_id, e) for e in errors)
+                has_forecast = any(
+                    well.get_forecast(p) is not None
+                    for p in self.config.products
+                )
+                return has_forecast, not has_forecast
+            return True, False
+
+        except Exception as e:
+            errors_list.append((well_id, str(e)))
+            logger.error(f"Failed to process {well_id}: {e}")
+            return False, True
+
     def process(
         self,
         wells: list[Well],
@@ -574,11 +595,7 @@ class BatchProcessor:
 
         if not filtered_wells:
             return BatchResult(
-                wells=[],
-                successful=0,
-                failed=0,
-                skipped=skipped,
-                errors=[]
+                wells=[], successful=0, failed=0, skipped=skipped, errors=[],
             )
 
         product_configs, validation_config, refinement_options, refinement_enabled = (
@@ -587,9 +604,9 @@ class BatchProcessor:
 
         successful = 0
         failed = 0
-        all_errors = []
-        processed_wells = []
-        all_validation_results = {}
+        all_errors: list = []
+        processed_wells: list = []
+        all_validation_results: dict = {}
         all_refinement_results = RefinementResults() if refinement_enabled else None
 
         workers = self._resolve_workers(len(filtered_wells))
@@ -602,37 +619,16 @@ class BatchProcessor:
 
             iterator = as_completed(futures)
             if show_progress:
-                iterator = tqdm(
-                    iterator,
-                    total=len(futures),
-                    desc="Fitting wells"
-                )
+                iterator = tqdm(iterator, total=len(futures), desc="Fitting wells")
 
             for future in iterator:
                 well_id = futures[future]
-                try:
-                    well, errors, validation_result, refinement_result = future.result()
-                    processed_wells.append(well)
-                    all_validation_results[well_id] = validation_result
-                    self._collect_refinement(refinement_result, all_refinement_results, well_id)
-
-                    if errors:
-                        all_errors.extend((well_id, e) for e in errors)
-                        has_forecast = any(
-                            well.get_forecast(p) is not None
-                            for p in self.config.products
-                        )
-                        if has_forecast:
-                            successful += 1
-                        else:
-                            failed += 1
-                    else:
-                        successful += 1
-
-                except Exception as e:
-                    failed += 1
-                    all_errors.append((well_id, str(e)))
-                    logger.error(f"Failed to process {well_id}: {e}")
+                is_success, is_failure = self._tally_future_result(
+                    future, well_id, processed_wells,
+                    all_validation_results, all_refinement_results, all_errors,
+                )
+                successful += is_success
+                failed += is_failure
 
         return BatchResult(
             wells=processed_wells,
@@ -693,19 +689,16 @@ class BatchProcessor:
 
         if not remaining_wells:
             return BatchResult(
-                wells=[],
-                successful=checkpoint.successful,
-                failed=checkpoint.failed,
-                skipped=checkpoint.skipped,
-                errors=checkpoint.errors,
+                wells=[], successful=checkpoint.successful, failed=checkpoint.failed,
+                skipped=checkpoint.skipped, errors=checkpoint.errors,
             )
 
         product_configs, validation_config, refinement_options, refinement_enabled = (
             self._build_processing_context()
         )
 
-        processed_wells = []
-        all_validation_results = {}
+        processed_wells: list = []
+        all_validation_results: dict = {}
         all_refinement_results = RefinementResults() if refinement_enabled else None
         wells_since_checkpoint = 0
 
@@ -721,52 +714,32 @@ class BatchProcessor:
                 iterator = as_completed(futures)
                 if show_progress:
                     iterator = tqdm(
-                        iterator,
-                        total=len(futures),
-                        desc="Fitting wells",
+                        iterator, total=len(futures), desc="Fitting wells",
                         initial=len(checkpoint.processed_well_ids) - checkpoint.skipped,
                     )
 
                 for future in iterator:
                     well_id = futures[future]
-                    try:
-                        well, errors, validation_result, refinement_result = future.result()
-                        processed_wells.append(well)
-                        all_validation_results[well_id] = validation_result
-                        checkpoint.processed_well_ids.add(well_id)
-                        self._collect_refinement(refinement_result, all_refinement_results, well_id)
+                    is_success, is_failure = self._tally_future_result(
+                        future, well_id, processed_wells,
+                        all_validation_results, all_refinement_results,
+                        checkpoint.errors,
+                    )
+                    checkpoint.processed_well_ids.add(well_id)
+                    checkpoint.successful += is_success
+                    checkpoint.failed += is_failure
 
-                        if errors:
-                            checkpoint.errors.extend((well_id, e) for e in errors)
-                            has_forecast = any(
-                                well.get_forecast(p) is not None
-                                for p in self.config.products
-                            )
-                            if has_forecast:
-                                checkpoint.successful += 1
-                            else:
-                                checkpoint.failed += 1
-                        else:
-                            checkpoint.successful += 1
+                    if progress_callback:
+                        progress_callback(
+                            len(checkpoint.processed_well_ids),
+                            checkpoint.total_wells,
+                            well_id,
+                        )
 
-                        if progress_callback:
-                            progress_callback(
-                                len(checkpoint.processed_well_ids),
-                                checkpoint.total_wells,
-                                well_id,
-                            )
-
-                        wells_since_checkpoint += 1
-                        if wells_since_checkpoint >= checkpoint_interval:
-                            checkpoint.save(checkpoint_file)
-                            wells_since_checkpoint = 0
-
-                    except Exception as e:
-                        checkpoint.failed += 1
-                        checkpoint.errors.append((well_id, str(e)))
-                        checkpoint.processed_well_ids.add(well_id)
-                        logger.error(f"Failed to process {well_id}: {e}")
+                    wells_since_checkpoint += 1
+                    if wells_since_checkpoint >= checkpoint_interval or is_failure:
                         checkpoint.save(checkpoint_file)
+                        wells_since_checkpoint = 0
 
         except KeyboardInterrupt:
             logger.warning("Processing interrupted. Saving checkpoint...")
@@ -932,78 +905,83 @@ class BatchProcessor:
             f.write("PyForecast Refinement Analysis Report\n")
             f.write("=" * 40 + "\n\n")
 
-            # Hindcast summary
             if refinement_results.hindcast_results:
-                f.write("Hindcast Validation Summary:\n")
-                summary = refinement_results.get_hindcast_summary()
-                f.write(f"  Wells with hindcast: {summary['count']}\n")
-                f.write(f"  Average MAPE: {summary['avg_mape']:.1f}%\n")
-                f.write(f"  Median MAPE: {summary['median_mape']:.1f}%\n")
-                f.write(f"  Average correlation: {summary['avg_correlation']:.3f}\n")
-                f.write(f"  Good hindcast rate: {summary['good_hindcast_pct']:.1f}%\n")
-                f.write("\n")
+                self._write_hindcast_section(f, refinement_results)
 
-                # Detailed hindcast results
-                f.write("Hindcast Details:\n")
-                f.write("-" * 40 + "\n")
-                for (well_id, product), hindcast in sorted(refinement_results.hindcast_results.items()):
-                    status = "GOOD" if hindcast.is_good_hindcast else "POOR"
-                    f.write(
-                        f"  {well_id}/{product}: MAPE={hindcast.mape:.1f}%, "
-                        f"corr={hindcast.correlation:.3f}, bias={hindcast.bias:.1%} [{status}]\n"
-                    )
-                f.write("\n")
-
-            # Residual diagnostics summary
             if refinement_results.residual_diagnostics:
-                f.write("Residual Analysis Summary:\n")
-                systematic_count = sum(
-                    1 for d in refinement_results.residual_diagnostics.values()
-                    if d.has_systematic_pattern
-                )
-                total = len(refinement_results.residual_diagnostics)
-                f.write(f"  Total analyzed: {total}\n")
-                f.write(f"  With systematic patterns: {systematic_count} ({systematic_count/total*100:.1f}%)\n")
-                f.write("\n")
+                self._write_residual_section(f, refinement_results)
 
-                # Flag wells with systematic patterns
-                f.write("Wells with systematic residual patterns:\n")
-                f.write("-" * 40 + "\n")
-                for (well_id, product), diag in sorted(refinement_results.residual_diagnostics.items()):
-                    if diag.has_systematic_pattern:
-                        f.write(
-                            f"  {well_id}/{product}: DW={diag.durbin_watson:.2f}, "
-                            f"early_bias={diag.early_bias:.1%}, late_bias={diag.late_bias:.1%}\n"
-                        )
-                f.write("\n")
-
-            # Ground truth comparison summary
             if refinement_results.ground_truth_results:
-                f.write("Ground Truth Comparison Summary:\n")
-                gt_summary = refinement_results.get_ground_truth_summary()
-                f.write(f"  Wells with ARIES data: {gt_summary['count']}\n")
-                f.write(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%\n")
-                f.write(f"  Average correlation: {gt_summary['avg_correlation']:.3f}\n")
-                f.write(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%\n")
-                f.write("\n")
-
-                # Grade distribution
-                grades = gt_summary.get("grade_distribution", {})
-                f.write("  Grade distribution:\n")
-                for grade in ["A", "B", "C", "D"]:
-                    count = grades.get(grade, 0)
-                    f.write(f"    {grade}: {count}\n")
-                f.write("\n")
-
-                # Detailed ground truth results
-                f.write("Ground Truth Details:\n")
-                f.write("-" * 40 + "\n")
-                for (well_id, product), gt_result in sorted(refinement_results.ground_truth_results.items()):
-                    status = "GOOD" if gt_result.is_good_match else "----"
-                    f.write(
-                        f"  {well_id}/{product}: [{gt_result.match_grade}] {status} "
-                        f"MAPE={gt_result.mape:.1f}%, corr={gt_result.correlation:.3f}, "
-                        f"cum_diff={gt_result.cumulative_diff_pct:+.1f}%\n"
-                    )
+                self._write_ground_truth_section(f, refinement_results)
 
         logger.info(f"Saved refinement report to {report_path}")
+
+    @staticmethod
+    def _write_hindcast_section(f, refinement_results: RefinementResults) -> None:
+        """Write hindcast validation section to report file."""
+        summary = refinement_results.get_hindcast_summary()
+        f.write("Hindcast Validation Summary:\n")
+        f.write(f"  Wells with hindcast: {summary['count']}\n")
+        f.write(f"  Average MAPE: {summary['avg_mape']:.1f}%\n")
+        f.write(f"  Median MAPE: {summary['median_mape']:.1f}%\n")
+        f.write(f"  Average correlation: {summary['avg_correlation']:.3f}\n")
+        f.write(f"  Good hindcast rate: {summary['good_hindcast_pct']:.1f}%\n\n")
+
+        f.write("Hindcast Details:\n")
+        f.write("-" * 40 + "\n")
+        for (well_id, product), hindcast in sorted(refinement_results.hindcast_results.items()):
+            status = "GOOD" if hindcast.is_good_hindcast else "POOR"
+            f.write(
+                f"  {well_id}/{product}: MAPE={hindcast.mape:.1f}%, "
+                f"corr={hindcast.correlation:.3f}, bias={hindcast.bias:.1%} [{status}]\n"
+            )
+        f.write("\n")
+
+    @staticmethod
+    def _write_residual_section(f, refinement_results: RefinementResults) -> None:
+        """Write residual diagnostics section to report file."""
+        systematic_count = sum(
+            1 for d in refinement_results.residual_diagnostics.values()
+            if d.has_systematic_pattern
+        )
+        total = len(refinement_results.residual_diagnostics)
+        f.write("Residual Analysis Summary:\n")
+        f.write(f"  Total analyzed: {total}\n")
+        f.write(f"  With systematic patterns: {systematic_count} ({systematic_count/total*100:.1f}%)\n\n")
+
+        f.write("Wells with systematic residual patterns:\n")
+        f.write("-" * 40 + "\n")
+        for (well_id, product), diag in sorted(refinement_results.residual_diagnostics.items()):
+            if diag.has_systematic_pattern:
+                f.write(
+                    f"  {well_id}/{product}: DW={diag.durbin_watson:.2f}, "
+                    f"early_bias={diag.early_bias:.1%}, late_bias={diag.late_bias:.1%}\n"
+                )
+        f.write("\n")
+
+    @staticmethod
+    def _write_ground_truth_section(f, refinement_results: RefinementResults) -> None:
+        """Write ground truth comparison section to report file."""
+        gt_summary = refinement_results.get_ground_truth_summary()
+        f.write("Ground Truth Comparison Summary:\n")
+        f.write(f"  Wells with ARIES data: {gt_summary['count']}\n")
+        f.write(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%\n")
+        f.write(f"  Average correlation: {gt_summary['avg_correlation']:.3f}\n")
+        f.write(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%\n\n")
+
+        grades = gt_summary.get("grade_distribution", {})
+        f.write("  Grade distribution:\n")
+        for grade in ["A", "B", "C", "D"]:
+            count = grades.get(grade, 0)
+            f.write(f"    {grade}: {count}\n")
+        f.write("\n")
+
+        f.write("Ground Truth Details:\n")
+        f.write("-" * 40 + "\n")
+        for (well_id, product), gt_result in sorted(refinement_results.ground_truth_results.items()):
+            status = "GOOD" if gt_result.is_good_match else "----"
+            f.write(
+                f"  {well_id}/{product}: [{gt_result.match_grade}] {status} "
+                f"MAPE={gt_result.mape:.1f}%, corr={gt_result.correlation:.3f}, "
+                f"cum_diff={gt_result.cumulative_diff_pct:+.1f}%\n"
+            )

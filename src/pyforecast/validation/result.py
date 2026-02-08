@@ -48,6 +48,81 @@ class ValidationIssue:
         severity_str = self.severity.name
         return f"[{self.code}] {severity_str}: {self.message}"
 
+    # --- Factory methods for common issue patterns ---
+
+    @staticmethod
+    def negative_values(product: str, count: int, indices: list, values: list) -> "ValidationIssue":
+        """Create IV001: Negative production values issue."""
+        return ValidationIssue(
+            code="IV001",
+            category=IssueCategory.DATA_FORMAT,
+            severity=IssueSeverity.ERROR,
+            message=f"Found {count} negative {product} values",
+            guidance="Production values must be non-negative; check data source for errors",
+            details={"negative_count": count, "indices": indices[:10], "values": values[:10], "product": product},
+        )
+
+    @staticmethod
+    def exceeds_threshold(product: str, count: int, threshold: float, indices: list, values: list, max_value: float) -> "ValidationIssue":
+        """Create IV002: Values exceed threshold issue."""
+        return ValidationIssue(
+            code="IV002",
+            category=IssueCategory.DATA_FORMAT,
+            severity=IssueSeverity.WARNING,
+            message=f"Found {count} {product} values exceeding {threshold:,.0f}",
+            guidance="Very high production values may indicate unit conversion issues or data errors",
+            details={"exceeds_count": count, "threshold": threshold, "indices": indices[:10], "values": values[:10], "max_value": max_value, "product": product},
+        )
+
+    @staticmethod
+    def future_dates(count: int, first_date: str, indices: list) -> "ValidationIssue":
+        """Create IV004: Future dates issue."""
+        return ValidationIssue(
+            code="IV004",
+            category=IssueCategory.DATA_FORMAT,
+            severity=IssueSeverity.WARNING,
+            message=f"Found {count} future dates in production data",
+            guidance="Verify data dates are correct; future dates may indicate data entry errors",
+            details={"future_date_count": count, "first_future_date": first_date, "indices": indices[:10]},
+        )
+
+    @staticmethod
+    def data_gaps(gap_count: int, gaps: list, total_gap_months: int) -> "ValidationIssue":
+        """Create DQ001: Data gaps issue."""
+        return ValidationIssue(
+            code="DQ001",
+            category=IssueCategory.DATA_QUALITY,
+            severity=IssueSeverity.WARNING,
+            message=f"Found {gap_count} data gaps",
+            guidance="Gaps may indicate shut-ins or missing data; consider excluding or interpolating",
+            details={"gap_count": gap_count, "gaps": gaps[:5], "total_gap_months": total_gap_months},
+        )
+
+    @staticmethod
+    def outliers(product: str, count: int, indices: list, values: list, median: float, mad: float, sigma: float) -> "ValidationIssue":
+        """Create DQ002: Outliers issue."""
+        return ValidationIssue(
+            code="DQ002",
+            category=IssueCategory.DATA_QUALITY,
+            severity=IssueSeverity.WARNING,
+            message=f"Found {count} potential outliers in {product} data",
+            guidance="Review outlier values for data errors; consider excluding from fit",
+            details={"outlier_count": count, "indices": indices[:10], "values": values[:10], "median": median, "mad": mad, "sigma_threshold": sigma},
+        )
+
+    @staticmethod
+    def poor_fit(product: str, r_squared: float, threshold: float, rmse: float) -> "ValidationIssue":
+        """Create FR001: Poor fit quality issue."""
+        severity = IssueSeverity.ERROR if r_squared < 0.3 else IssueSeverity.WARNING
+        return ValidationIssue(
+            code="FR001",
+            category=IssueCategory.FITTING_RESULT,
+            severity=severity,
+            message=f"Poor {product} fit quality: R²={r_squared:.3f}",
+            guidance="Low R² suggests poor model fit; consider data quality or alternative model",
+            details={"r_squared": r_squared, "threshold": threshold, "rmse": rmse},
+        )
+
 
 @dataclass
 class ValidationResult:
@@ -169,3 +244,53 @@ def merge_results(results: list[ValidationResult]) -> ValidationResult:
     for result in results[1:]:
         combined = combined.merge(result)
     return combined
+
+
+def summarize_validation(
+    results: dict[str, ValidationResult] | list[ValidationResult],
+) -> dict:
+    """Calculate validation summary statistics from results.
+
+    Consolidates the duplicated summary logic from BatchResult,
+    BatchExporter, and ValidationOrchestrator into one place.
+
+    Args:
+        results: Dict of well_id -> ValidationResult, or list of results
+
+    Returns:
+        Dictionary with summary statistics:
+            - wells_with_errors: count of wells with at least one error
+            - wells_with_warnings: count of wells with at least one warning
+            - total_errors: total error count
+            - total_warnings: total warning count
+            - by_category: dict of category name -> issue count
+            - by_code: dict of issue code -> issue count
+    """
+    if isinstance(results, dict):
+        result_iter = results.values()
+    else:
+        result_iter = results
+
+    summary: dict[str, Any] = {
+        "wells_with_errors": 0,
+        "wells_with_warnings": 0,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "by_category": {},
+        "by_code": {},
+    }
+
+    for result in result_iter:
+        if result.has_errors:
+            summary["wells_with_errors"] += 1
+        if result.has_warnings:
+            summary["wells_with_warnings"] += 1
+        summary["total_errors"] += result.error_count
+        summary["total_warnings"] += result.warning_count
+
+        for issue in result.issues:
+            cat_name = issue.category.name
+            summary["by_category"][cat_name] = summary["by_category"].get(cat_name, 0) + 1
+            summary["by_code"][issue.code] = summary["by_code"].get(issue.code, 0) + 1
+
+    return summary

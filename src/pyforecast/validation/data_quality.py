@@ -123,17 +123,10 @@ class DataQualityValidator:
                 in_gap = False
 
         if gaps:
-            result.add_issue(ValidationIssue(
-                code="DQ001",
-                category=IssueCategory.DATA_QUALITY,
-                severity=IssueSeverity.WARNING,
-                message=f"Found {len(gaps)} data gaps (>={self.gap_threshold_months} months)",
-                guidance="Gaps may indicate shut-ins or missing data; consider excluding or interpolating",
-                details={
-                    "gap_count": len(gaps),
-                    "gaps": [(g[0], g[1], g[2]) for g in gaps[:5]],  # (start, end, length)
-                    "total_gap_months": sum(g[2] for g in gaps),
-                },
+            result.add_issue(ValidationIssue.data_gaps(
+                gap_count=len(gaps),
+                gaps=[(g[0], g[1], g[2]) for g in gaps],
+                total_gap_months=sum(g[2] for g in gaps),
             ))
 
         return result
@@ -182,20 +175,14 @@ class DataQualityValidator:
             outlier_indices = np.where(outlier_mask)[0].tolist()
             outlier_values = values[outlier_mask].tolist()
 
-            result.add_issue(ValidationIssue(
-                code="DQ002",
-                category=IssueCategory.DATA_QUALITY,
-                severity=IssueSeverity.WARNING,
-                message=f"Found {len(outlier_indices)} potential outliers in {product} data",
-                guidance="Review outlier values for data errors; consider excluding from fit",
-                details={
-                    "outlier_count": len(outlier_indices),
-                    "indices": outlier_indices[:10],
-                    "values": outlier_values[:10],
-                    "median": float(median),
-                    "mad": float(mad),
-                    "sigma_threshold": self.outlier_sigma,
-                },
+            result.add_issue(ValidationIssue.outliers(
+                product=product,
+                count=len(outlier_indices),
+                indices=outlier_indices,
+                values=outlier_values,
+                median=float(median),
+                mad=float(mad),
+                sigma=self.outlier_sigma,
             ))
 
         return result

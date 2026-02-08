@@ -207,8 +207,8 @@ class BatchExporter:
         logger.info(f"Saved validation report to {report_path}")
         return report_path
 
+    @staticmethod
     def _get_validation_summary(
-        self,
         validation_results: dict[str, ValidationResult],
     ) -> dict:
         """Calculate validation summary statistics.
@@ -219,26 +219,5 @@ class BatchExporter:
         Returns:
             Summary statistics dict
         """
-        summary = {
-            "wells_with_errors": 0,
-            "wells_with_warnings": 0,
-            "total_errors": 0,
-            "total_warnings": 0,
-            "by_category": {},
-        }
-
-        for result in validation_results.values():
-            if result.has_errors:
-                summary["wells_with_errors"] += 1
-            if result.has_warnings:
-                summary["wells_with_warnings"] += 1
-            summary["total_errors"] += result.error_count
-            summary["total_warnings"] += result.warning_count
-
-            for issue in result.issues:
-                cat_name = issue.category.name
-                if cat_name not in summary["by_category"]:
-                    summary["by_category"][cat_name] = 0
-                summary["by_category"][cat_name] += 1
-
-        return summary
+        from ..validation.result import summarize_validation
+        return summarize_validation(validation_results)

@@ -34,6 +34,7 @@ from .result import (
     ValidationIssue,
     ValidationResult,
     merge_results,
+    summarize_validation,
 )
 from .input_validator import InputValidator
 from .data_quality import DataQualityValidator
@@ -47,6 +48,7 @@ __all__ = [
     "ValidationIssue",
     "ValidationResult",
     "merge_results",
+    "summarize_validation",
     # Validators
     "InputValidator",
     "DataQualityValidator",

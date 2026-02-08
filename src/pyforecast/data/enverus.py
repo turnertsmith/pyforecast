@@ -48,11 +48,10 @@ Entity ID,Well Name,Production Date,Oil (BBL),Gas (MCF),Water (BBL)
 ```
 """
 
-import numpy as np
 import pandas as pd
 
 from .base import DataParser
-from .well import Well, WellIdentifier, ProductionData
+from .well import WellIdentifier
 
 
 class EnverusParser(DataParser):
@@ -155,74 +154,18 @@ class EnverusParser(DataParser):
 
         return has_id and has_date and has_production
 
-    def _map_columns(self, df: pd.DataFrame) -> dict[str, str]:
-        """Map DataFrame columns to standard names.
-
-        Returns:
-            Dictionary mapping standard name -> actual column name
-        """
-        cols_lower = {c.lower().strip(): c for c in df.columns}
-        mapping = {}
-
-        for col_lower, actual_col in cols_lower.items():
-            if col_lower in self.COLUMN_MAPPINGS:
-                standard_name = self.COLUMN_MAPPINGS[col_lower]
-                # Don't overwrite if already mapped (priority to first match)
-                if standard_name not in mapping:
-                    mapping[standard_name] = actual_col
-
-        return mapping
-
-    def parse(self, df: pd.DataFrame) -> list[Well]:
-        """Parse Enverus DataFrame into Well objects."""
-        col_map = self._map_columns(df)
-
-        # Determine ID column
+    def _resolve_id_column(self, col_map: dict[str, str]) -> str:
+        """Resolve Enverus ID column (entity_id or api)."""
         id_col = col_map.get('entity_id') or col_map.get('api')
         if not id_col:
             raise ValueError("No identifier column found")
+        return id_col
 
-        date_col = col_map.get('date')
-        if not date_col:
-            raise ValueError("No date column found")
-
-        oil_col = col_map.get('oil')
-        gas_col = col_map.get('gas')
-        water_col = col_map.get('water')
+    def _build_identifier(self, well_id: str, col_map: dict[str, str], group: pd.DataFrame) -> WellIdentifier:
+        """Build identifier from Enverus columns."""
         name_col = col_map.get('well_name')
-
-        # Convert date column
-        df = df.copy()
-        df[date_col] = pd.to_datetime(df[date_col])
-
-        # Group by well
-        wells = []
-        for well_id, group in df.groupby(id_col):
-            group = group.sort_values(date_col)
-
-            # Create identifier
-            identifier = WellIdentifier(
-                entity_id=str(well_id) if 'entity_id' in col_map else None,
-                api=str(well_id) if 'api' in col_map and 'entity_id' not in col_map else None,
-                well_name=str(group[name_col].iloc[0]) if name_col and name_col in group.columns else None,
-            )
-
-            # Extract production arrays
-            dates = group[date_col].values
-            oil = group[oil_col].fillna(0).values if oil_col else np.zeros(len(group))
-            gas = group[gas_col].fillna(0).values if gas_col else np.zeros(len(group))
-            water = group[water_col].fillna(0).values if water_col else None
-
-            production = ProductionData(
-                dates=dates,
-                oil=oil.astype(float),
-                gas=gas.astype(float),
-                water=water.astype(float) if water is not None else None,
-            )
-
-            wells.append(Well(
-                identifier=identifier,
-                production=production,
-            ))
-
-        return wells
+        return WellIdentifier(
+            entity_id=well_id if 'entity_id' in col_map else None,
+            api=well_id if 'api' in col_map and 'entity_id' not in col_map else None,
+            well_name=str(group[name_col].iloc[0]) if name_col and name_col in group.columns else None,
+        )
