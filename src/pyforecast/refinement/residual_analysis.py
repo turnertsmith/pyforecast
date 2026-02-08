@@ -24,15 +24,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Validation issue codes for residual analysis
-RESIDUAL_ISSUE_CODES = {
-    "RD001": "Significant autocorrelation in residuals",
-    "RD002": "Systematic early/late bias pattern",
-    "RD003": "Non-zero mean residuals",
-    "RD004": "High residual variance",
-}
-
-
 @dataclass
 class ResidualAnalysisConfig:
     """Configuration for residual analysis.

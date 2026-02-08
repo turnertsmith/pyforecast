@@ -352,7 +352,8 @@ def _report_results(result, gt_results, output, gt_plots) -> None:
             )
             total = len(ref_results.residual_diagnostics)
             typer.echo(f"  Residual analysis: {total} fits analyzed")
-            typer.echo(f"    With systematic patterns: {systematic} ({systematic/total*100:.1f}%)")
+            pct = systematic / total * 100 if total > 0 else 0.0
+            typer.echo(f"    With systematic patterns: {systematic} ({pct:.1f}%)")
 
         typer.echo(f"\n  See {output}/refinement_report.txt for details")
 
@@ -364,7 +365,8 @@ def _report_results(result, gt_results, output, gt_plots) -> None:
         typer.echo("")
         typer.echo("Ground Truth Comparison:")
         typer.echo(f"  Wells with ARIES data: {gt_summary['count']} of {result.successful}")
-        typer.echo(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%")
+        avg_mape = gt_summary['avg_mape']
+        typer.echo(f"  Average MAPE: {f'{avg_mape:.1f}%' if avg_mape is not None else 'N/A'}")
         typer.echo(f"  Average correlation: {gt_summary['avg_correlation']:.3f}")
         typer.echo(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%")
 
@@ -1163,6 +1165,8 @@ def calibrate_regime(
     import csv
     from datetime import datetime
 
+    import pandas as pd
+
     from ..data.base import load_wells
     from ..core.fitting import DeclineFitter, FittingConfig
 
@@ -1217,7 +1221,8 @@ def calibrate_regime(
             dates = well.production.dates
             event_idx = None
             for i, d in enumerate(dates):
-                if d.year == event_date.year and d.month == event_date.month:
+                dt = pd.Timestamp(d)
+                if dt.year == event_date.year and dt.month == event_date.month:
                     event_idx = i
                     break
 

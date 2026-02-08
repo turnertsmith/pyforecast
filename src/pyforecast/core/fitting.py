@@ -847,6 +847,7 @@ class DeclineFitter:
                     t_fit, q_bootstrap,
                     base_result.regime_start_idx,
                     apply_weights,
+                    effective_dmin=base_result.model.dmin,
                 )
 
                 # Generate forecast from bootstrap fit
@@ -878,6 +879,7 @@ class DeclineFitter:
         q_fit: np.ndarray,
         regime_start: int,
         apply_weights: bool,
+        effective_dmin: float | None = None,
     ) -> ForecastResult:
         """Internal method to fit a bootstrap sample.
 
@@ -886,15 +888,17 @@ class DeclineFitter:
             q_fit: Bootstrap production rates
             regime_start: Original regime start index
             apply_weights: Whether to apply weights
+            effective_dmin: Effective Dmin to use (defaults to config dmin_monthly)
 
         Returns:
             ForecastResult from bootstrap fit
         """
+        dmin = effective_dmin if effective_dmin is not None else self.config.dmin_monthly
         weights = self.compute_weights(len(q_fit)) if apply_weights else np.ones(len(q_fit))
 
         qi0, di0, b0 = self.initial_guess(t_fit, q_fit, weights)
 
-        bounds_lower, bounds_upper = self._build_bounds(qi0, self.config.dmin_monthly)
+        bounds_lower, bounds_upper = self._build_bounds(qi0, dmin)
 
         qi0 = np.clip(qi0, bounds_lower[0], bounds_upper[0])
         di0 = np.clip(di0, bounds_lower[1], bounds_upper[1])
@@ -920,7 +924,7 @@ class DeclineFitter:
             qi=qi_fit,
             di=di_fit,
             b=b_fit,
-            dmin=self.config.dmin_monthly
+            dmin=dmin
         )
 
         return self._build_result(
@@ -1029,14 +1033,17 @@ class DeclineFitter:
                 residuals = (q_fit - pred) ** 2 * weights
                 return np.sum(residuals)
 
-            result = optimize.differential_evolution(
-                objective,
-                bounds=list(zip(bounds_lower, bounds_upper)),
-                seed=42,
-                maxiter=1000,
-                tol=1e-7
-            )
-            qi_fit, di_fit = result.x
+            try:
+                result = optimize.differential_evolution(
+                    objective,
+                    bounds=list(zip(bounds_lower, bounds_upper)),
+                    seed=42,
+                    maxiter=1000,
+                    tol=1e-7
+                )
+                qi_fit, di_fit = result.x
+            except (RuntimeError, ValueError):
+                qi_fit, di_fit = qi0, di0
 
         model = HyperbolicModel(
             qi=qi_fit,

@@ -140,7 +140,7 @@ class AriesForecastImporter:
         r"^\s*"
         r"(?P<qi>[\d.]+)\s+"  # Initial rate
         r"X\s+"
-        r"(?P<unit>[BMG]/[MD])\s+"  # Unit (B/M, B/D, M/M, M/D, G/M, G/D)
+        r"(?P<unit>[BMGW]/[MD])\s+"  # Unit (B/M, B/D, M/M, M/D, G/M, G/D, W/M, W/D)
         r"(?P<dmin>[\d.]+)\s+"  # Terminal decline %
         r"(?P<type>EXP|HYP|HRM)\s+"  # Decline type
         r"B/(?P<b>[\d.]+)\s+"  # b-factor
@@ -154,7 +154,7 @@ class AriesForecastImporter:
         r"^\s*"
         r"(?P<qi>[\d.]+)\s+"
         r"X\s+"
-        r"(?P<unit>[BMG]/[MD])\s+"
+        r"(?P<unit>[BMGW]/[MD])\s+"
         r"(?P<dmin>[\d.]+)\s+"
         r"B/(?P<b>[\d.]+)\s+"
         r"(?P<di>[\d.]+)"
@@ -495,7 +495,14 @@ class AriesForecastImporter:
         normalized_id = normalize_well_id(propnum)
 
         if self._lazy and self._filepath:
-            return self._stream_find(normalized_id, product)
+            # Check cache first, then stream
+            cached = self._forecasts.get((normalized_id, product))
+            if cached is not None:
+                return cached
+            result = self._stream_find(normalized_id, product)
+            if result is not None:
+                self._forecasts[(normalized_id, product)] = result
+            return result
 
         return self._forecasts.get((normalized_id, product))
 
@@ -624,8 +631,14 @@ class AriesForecastImporter:
         return sorted(well_ids)
 
     def list_products(self, propnum: str) -> list[str]:
-        """List products available for a well."""
+        """List products available for a well.
+
+        In lazy mode, checks each product via get() instead of using
+        the in-memory cache.
+        """
         normalized_id = normalize_well_id(propnum)
+        if self._lazy and self._filepath:
+            return [p for p in ("oil", "gas", "water") if self.get(propnum, p) is not None]
         return sorted(
             product for p, product in self._forecasts.keys() if p == normalized_id
         )
@@ -647,7 +660,10 @@ class AriesForecastImporter:
         """Check if forecast exists for (propnum, product).
 
         The propnum is normalized before lookup.
+        In lazy mode, falls back to get() for file-based lookup.
         """
         propnum, product = key
+        if self._lazy and self._filepath:
+            return self.get(propnum, product) is not None
         normalized_id = normalize_well_id(propnum)
         return (normalized_id, product) in self._forecasts

@@ -7,8 +7,6 @@ for different groupings (global, by basin, by formation).
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Iterator
-
 import numpy as np
 
 from .schemas import FitLogRecord, ParameterSuggestion
@@ -178,15 +176,8 @@ class ParameterLearner:
             self.config.regime_threshold_range[1],
         )
 
-        # Derive regime window and sustained months from records
-        # Use mode (most common value) since these are integers
-        regime_windows = [r.regime_start_idx for r in records if r.regime_start_idx is not None]
-        if regime_windows:
-            suggested_window = 6  # Default
-        else:
-            suggested_window = 6
-
-        suggested_sustained = 2  # Default
+        suggested_window = 6
+        suggested_sustained = 2
 
         # Compute performance metrics
         avg_r_squared = float(np.mean(r_squareds))

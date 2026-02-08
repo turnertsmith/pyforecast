@@ -949,7 +949,8 @@ class BatchProcessor:
         total = len(refinement_results.residual_diagnostics)
         f.write("Residual Analysis Summary:\n")
         f.write(f"  Total analyzed: {total}\n")
-        f.write(f"  With systematic patterns: {systematic_count} ({systematic_count/total*100:.1f}%)\n\n")
+        pct = systematic_count / total * 100 if total > 0 else 0.0
+        f.write(f"  With systematic patterns: {systematic_count} ({pct:.1f}%)\n\n")
 
         f.write("Wells with systematic residual patterns:\n")
         f.write("-" * 40 + "\n")
@@ -967,7 +968,8 @@ class BatchProcessor:
         gt_summary = refinement_results.get_ground_truth_summary()
         f.write("Ground Truth Comparison Summary:\n")
         f.write(f"  Wells with ARIES data: {gt_summary['count']}\n")
-        f.write(f"  Average MAPE: {gt_summary['avg_mape']:.1f}%\n")
+        avg_mape = gt_summary['avg_mape']
+        f.write(f"  Average MAPE: {f'{avg_mape:.1f}%' if avg_mape is not None else 'N/A'}\n")
         f.write(f"  Average correlation: {gt_summary['avg_correlation']:.3f}\n")
         f.write(f"  Good match rate: {gt_summary['good_match_pct']:.1f}%\n\n")
 
@@ -982,8 +984,9 @@ class BatchProcessor:
         f.write("-" * 40 + "\n")
         for (well_id, product), gt_result in sorted(refinement_results.ground_truth_results.items()):
             status = "GOOD" if gt_result.is_good_match else "----"
+            mape_str = f"{gt_result.mape:.1f}%" if gt_result.mape is not None else "N/A"
             f.write(
                 f"  {well_id}/{product}: [{gt_result.match_grade}] {status} "
-                f"MAPE={gt_result.mape:.1f}%, corr={gt_result.correlation:.3f}, "
+                f"MAPE={mape_str}, corr={gt_result.correlation:.3f}, "
                 f"cum_diff={gt_result.cumulative_diff_pct:+.1f}%\n"
             )
